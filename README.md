@@ -27,6 +27,22 @@ python3 -m src.calibration calibrate neck_pan
 
 `center` never runs automatically and commands 0 degrees only after the immediate `CENTER` confirmation. `calibrate` requires you to type `CENTERED`, then requires `CENTER` immediately before it recommands that known baseline. Afterward only `+1`, `+2`, `-1`, and `-2` moves are permitted; set `min`, `max`, and `neutral`, then `save`.
 
+## Software alignment from a trusted powered reference
+
+If a servo was already commanded to a known angle and has remained powered and physically untouched since that command, `align` can find the desired forward-facing neutral without moving the horn. For example, if `neck_pan` was commanded to 0 degrees and the head is currently facing right:
+
+```bash
+python3 -m src.calibration align neck_pan
+```
+
+Enter `0` as the previously commanded angle, then type `POWERED` only if the servo has remained powered and has not been repositioned. This initial reference is recorded without sending a servo command. Then use only `+` and `-` for explicit one-degree moves; no sweep occurs. The default temporary software window is plus/minus 15 degrees from the reference. Set a smaller or larger conservative window (maximum 20 degrees) with:
+
+```bash
+python3 -m src.calibration align neck_pan --provisional-limit 10
+```
+
+When the head faces forward, type `SAVE`. This saves `neutral` only and deliberately clears movement limits: neutral alignment does **not** calibrate left/right travel. Later use the cautious `calibrate neck_pan` workflow to establish limits. If power was removed, the servo moved, or the horn/linkage was repositioned, do not use `align`; establish a safe reference with `prepare` and `center` instead.
+
 Keep fingers, wiring, cardboard, brackets, and tools clear. Stop if a servo strains, chatters, binds, or shifts the mechanism. Ctrl+C stops future software commands but cannot guarantee torque removal; physically disconnect servo power in an emergency.
 
 Run checks and mock-mode development with:

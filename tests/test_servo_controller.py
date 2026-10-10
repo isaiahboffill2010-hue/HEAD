@@ -6,7 +6,7 @@ from pathlib import Path
 from src.servo_controller import (ConfigurationError, LimitError, MockBackend,
     NotCalibratedError, PositionUnknownError, ServoConfig, ServoController,
     load_config, save_config)
-from src.calibration import center, preparation_text
+from src.calibration import align, center, preparation_text
 
 
 class QuietMock(MockBackend):
@@ -82,6 +82,39 @@ class ServoControllerTests(unittest.TestCase):
                         input_func=lambda _: "CENTER")
         self.assertEqual(result, 0)
         self.assertEqual(self.backend.commands, [("P6", 0)])
+
+    def test_adopt_confirmed_position_sends_no_command(self):
+        self.controller.adopt_confirmed_position("neck_pan", 0)
+        self.assertEqual(self.controller.position("neck_pan"), 0)
+        self.assertEqual(self.backend.commands, [])
+
+    def test_align_rejects_unconfirmed_reference_without_command(self):
+        answers = iter(["0", "no"])
+        result = align("neck_pan", {"neck_pan": self.cfg}, self.controller,
+                       Path("unused.json"), input_func=lambda _: next(answers))
+        self.assertEqual(result, 1)
+        self.assertEqual(self.backend.commands, [])
+
+    def test_align_saves_neutral_only_with_one_degree_steps(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "servos.json"
+            answers = iter(["0", "POWERED", "+", "SAVE"])
+            result = align("neck_pan", {"neck_pan": self.cfg}, self.controller, path,
+                           provisional_limit=2, input_func=lambda _: next(answers))
+            self.assertEqual(result, 0)
+            self.assertEqual(self.backend.commands, [("P6", 1)])
+            saved = load_config(path)["neck_pan"]
+            self.assertEqual(saved.neutral, 1)
+            self.assertIsNone(saved.min_angle)
+            self.assertIsNone(saved.max_angle)
+
+    def test_align_rejects_step_outside_provisional_window(self):
+        answers = iter(["0", "POWERED", "+", "+", "quit"])
+        result = align("neck_pan", {"neck_pan": self.cfg}, self.controller,
+                       Path("unused.json"), provisional_limit=1,
+                       input_func=lambda _: next(answers))
+        self.assertEqual(result, 0)
+        self.assertEqual(self.backend.commands, [("P6", 1)])
 
 
 if __name__ == "__main__":

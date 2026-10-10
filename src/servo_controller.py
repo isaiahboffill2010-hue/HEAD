@@ -156,6 +156,18 @@ class ServoController:
         self.backend.write(cfg.port, self._library_angle(cfg, angle))
         self._positions[name] = float(angle)
 
+    def adopt_confirmed_position(self, name: str, angle: float) -> None:
+        """Record a user-confirmed already-commanded position without writing PWM.
+
+        This is intentionally only for a servo that the user confirms remained
+        powered and untouched since that exact command. It cannot measure or
+        verify shaft position.
+        """
+        self._get(name)
+        if not LIBRARY_MIN <= angle <= LIBRARY_MAX:
+            raise LimitError("Confirmed angle must be between -90 and 90")
+        self._positions[name] = float(angle)
+
     def move_to(self, name: str, target: float, speed_dps: float = 30.0, step: float = 1.0) -> None:
         cfg = self._get(name)
         validate_config(name, cfg)

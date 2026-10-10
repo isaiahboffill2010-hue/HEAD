@@ -63,6 +63,66 @@ def calibrated_baseline(name, configs, controller: ServoController, input_func=i
     print("Centered baseline established at logical 0 degrees.")
     return True
 
+def align(name, configs, controller: ServoController, path: Path,
+          provisional_limit: float = 15.0, input_func=input) -> int:
+    """Find neutral from a continuously powered, user-confirmed reference."""
+    if not 1 <= provisional_limit <= 20:
+        raise ValueError("provisional limit must be between 1 and 20 degrees")
+    cfg = configs[name]
+    print(f"Aligning only {name} on {cfg.port}. No command has been sent.")
+    print("This does NOT read servo position. Use it only when you know the servo's")
+    print("previously commanded angle and it has remained powered and unrepositioned.")
+    try:
+        start = float(input_func("Enter that previously commanded logical angle (-90..90): "))
+    except ValueError:
+        print("Invalid angle; nothing moved.", file=sys.stderr)
+        return 2
+    if not -90 <= start <= 90:
+        print("Angle must be between -90 and 90; nothing moved.", file=sys.stderr)
+        return 2
+    print(SAFETY)
+    confirmation = input_func(
+        "Type POWERED to confirm it remained powered and unrepositioned since that command: "
+    ).strip()
+    if confirmation != "POWERED":
+        print("Reference not confirmed; nothing moved. Establish a safe reference with prepare/center first.")
+        return 1
+    controller.adopt_confirmed_position(name, start)
+    lower, upper = max(-90.0, start - provisional_limit), min(90.0, start + provisional_limit)
+    print(f"Trusted reference recorded without a servo command: {start:g} deg.")
+    print(f"Provisional software window: {lower:g}..{upper:g} deg. No automatic sweep will occur.")
+    print("Commands: +, -, SAVE, quit")
+    while True:
+        command = input_func(f"{name} [{controller.position(name):g} deg]> ").strip()
+        if command in {"+", "+1"}:
+            delta = 1
+        elif command in {"-", "-1"}:
+            delta = -1
+        elif command.upper() == "SAVE":
+            cfg.neutral = controller.position(name)
+            # Alignment establishes a neutral only; all travel limits need a
+            # separate cautious calibration around that neutral.
+            cfg.min_angle = None
+            cfg.max_angle = None
+            save_config(path, configs)
+            print(f"Saved neutral {cfg.neutral:g} deg only. Movement limits remain UNCALIBRATED.")
+            return 0
+        elif command.lower() in {"quit", "q"}:
+            print("Left alignment without saving changes.")
+            return 0
+        else:
+            print("Unknown command; use +, -, SAVE, or quit.")
+            continue
+        target = controller.position(name) + delta
+        if not lower <= target <= upper:
+            print(f"Rejected: {target:g} deg is outside provisional {lower:g}..{upper:g} deg window.")
+            continue
+        try:
+            position = controller.calibration_step(name, delta)
+            print(f"Now {position:g} deg (Robot HAT {position * cfg.direction:g} deg).")
+        except ServoError as exc:
+            print(f"Rejected: {exc}")
+
 def calibrate(name, configs, controller: ServoController, path: Path) -> int:
     cfg = configs[name]
     print(f"Calibrating only {name} on {cfg.port}. No command has been sent.")
@@ -132,6 +192,10 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("servo")
     centered = sub.add_parser("center", help="explicitly command 0 deg with linkage disengaged")
     centered.add_argument("servo")
+    aligned = sub.add_parser("align", help="find neutral from a confirmed powered reference")
+    aligned.add_argument("servo")
+    aligned.add_argument("--provisional-limit", type=float, default=15.0,
+                         help="temporary +/- degree window from reference (1..20; default 15)")
     cal = sub.add_parser("calibrate", help="calibrate one mechanically centered servo")
     cal.add_argument("servo")
     test = sub.add_parser("test", help="manually test one calibrated, centered servo")
@@ -155,6 +219,8 @@ def main(argv=None) -> int:
         controller = ServoController(configs, MockBackend() if args.mock else RobotHatBackend())
         if args.command == "center":
             return center(args.servo, configs, controller)
+        if args.command == "align":
+            return align(args.servo, configs, controller, args.config, args.provisional_limit)
         if args.command == "calibrate":
             return calibrate(args.servo, configs, controller, args.config)
         return test_servo(args.servo, configs, controller, args.speed)
