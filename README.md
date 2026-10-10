@@ -115,7 +115,7 @@ On the Pi, install the cloud SDK and ALSA player without changing the Robot HAT 
 ```bash
 cd ~/HEAD
 python3 -m pip install --user -r requirements.txt
-sudo apt-get install -y alsa-utils
+sudo apt-get install -y pulseaudio-utils alsa-utils
 cp .env.example .env.local
 nano .env.local
 ```
@@ -128,3 +128,17 @@ python3 -m src.robot_chat --voice-only
 ```
 
 Type a short message, then `quit`. Full mouth mode (`python3 -m src.robot_chat`) requires confirming that both jaws are continuously powered, unrepositioned, and currently at their saved closed neutral positions. `--mouth-test` speaks one test phrase after the same confirmations. The pipeline first tries word timing from the configured alignment model; if unavailable, the terminal reports its audio-energy fallback. Audio starts first, and the adaptive mouth synchronizer uses that playback clock—not a fixed animation. Ctrl+C stops future motion and audio; do not assume that it removes torque, so physically disconnect servo power if binding occurs.
+
+### Bluetooth / desktop audio output
+
+Audio playback runs as the current desktop user, never as root. With `HEAD_AUDIO_BACKEND=auto` (the default), HEAD prefers `paplay`, which sends audio to the current PipeWire/PulseAudio default sink—the Bluetooth speaker selected in Raspberry Pi Desktop. Choose explicitly with `HEAD_AUDIO_BACKEND=pulse` or `HEAD_AUDIO_BACKEND=alsa`; ALSA (`aplay`) is the fallback for direct devices.
+
+After connecting and selecting the Bluetooth speaker in the desktop audio menu, test Despina without moving servos:
+
+```bash
+cd ~/HEAD
+source .venv/bin/activate
+HEAD_AUDIO_BACKEND=pulse python3 -m src.robot_chat --voice-test
+```
+
+`paplay` does not expose the Bluetooth speaker's actual acoustic latency. Mouth synchronization uses the audio-process playback clock and can apply an explicit estimate with `HEAD_AUDIO_LATENCY_MS` (for example, `HEAD_AUDIO_LATENCY_MS=180`). Measure and tune this only on your own speaker; Bluetooth latency may vary and can limit lip-sync precision.

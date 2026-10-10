@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from .adaptive_lipsync import AdaptiveLipSynchronizer, calibrated_max_jaw_travel, load_motion_settings
-from .audio_sync import Aplay, energy_events, word_events
+from .audio_sync import AudioPlayer, energy_events, word_events
 from .gemini_service import GeminiConfig, GeminiError, GeminiService
 from .mouth import JAW_NAMES, MouthController
 from .mouth_calibration import _known_reference
@@ -21,7 +21,7 @@ def establish_mouth(configs, controller, input_func=input) -> bool:
             return False
     return True
 
-def speak(text, service: GeminiService, *, mouth=None, configs=None, player_factory=Aplay) -> None:
+def speak(text, service: GeminiService, *, mouth=None, configs=None, player_factory=AudioPlayer) -> None:
     with tempfile.TemporaryDirectory(prefix="head-tts-") as directory:
         wav = service.synthesize(text, Path(directory) / "despina.wav")
         words = service.word_timings(wav)
@@ -59,9 +59,13 @@ def main(argv=None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--voice-only", action="store_true")
     mode.add_argument("--mouth-test", action="store_true")
+    mode.add_argument("--voice-test", action="store_true", help="play one Despina test phrase without servos")
     args = parser.parse_args(argv)
     try:
         service = GeminiService(GeminiConfig.from_environment())
+        if args.voice_test:
+            speak("Hello. This is a Despina Bluetooth speaker test.", service)
+            return 0
         if args.voice_only: return run_session(service, voice_only=True)
         configs = load_config(Path(__file__).resolve().parents[1] / "config" / "servos.json")
         controller = ServoController(configs, RobotHatBackend())

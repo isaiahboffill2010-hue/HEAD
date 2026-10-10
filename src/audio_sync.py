@@ -1,6 +1,7 @@
 """WAV energy fallback and aplay playback clock integration."""
 from __future__ import annotations
 import audioop
+import os
 import shutil
 import subprocess
 import time
@@ -32,15 +33,42 @@ def word_events(words: list[dict[str, float]]) -> list[dict[str, float]]:
         events.extend(({"time": start, "openness": 0.55}, {"time": end, "openness": 0.0}))
     return sorted(events, key=lambda event: event["time"])
 
-class Aplay:
-    def __init__(self, wav_path: Path, popen=subprocess.Popen, clock: Callable[[], float] = time.monotonic) -> None:
-        self.wav_path, self._popen, self._clock, self.process, self.started = wav_path, popen, clock, None, None
+def select_audio_backend(requested: str | None = None, which: Callable[[str], str | None] = shutil.which) -> str:
+    """Prefer the desktop user's PipeWire/PulseAudio default sink."""
+    choice = (requested or os.getenv("HEAD_AUDIO_BACKEND", "auto")).lower()
+    if choice not in {"auto", "pulse", "alsa"}:
+        raise RuntimeError("HEAD_AUDIO_BACKEND must be auto, pulse, or alsa")
+    if choice in {"auto", "pulse"} and which("paplay"):
+        return "pulse"
+    if choice == "pulse":
+        raise RuntimeError("paplay is unavailable; install pulseaudio-utils or PipeWire PulseAudio compatibility")
+    if which("aplay"):
+        return "alsa"
+    raise RuntimeError("No audio player found; install pulseaudio-utils (paplay) or alsa-utils (aplay)")
+
+class AudioPlayer:
+    """User-session audio player with a playback-clock estimate for lip sync.
+
+    paplay targets the desktop session's default PulseAudio/PipeWire sink, which
+    is normally the selected Bluetooth speaker. Bluetooth acoustic latency is
+    not exposed by paplay; HEAD_AUDIO_LATENCY_MS can compensate conservatively.
+    """
+    def __init__(self, wav_path: Path, backend: str | None = None, latency_ms: float | None = None,
+                 popen=subprocess.Popen, clock: Callable[[], float] = time.monotonic,
+                 which: Callable[[str], str | None] = shutil.which) -> None:
+        self.wav_path, self.backend, self._popen, self._clock = wav_path, select_audio_backend(backend, which), popen, clock
+        self.latency_s = (float(os.getenv("HEAD_AUDIO_LATENCY_MS", "0")) if latency_ms is None else latency_ms) / 1000
+        if self.latency_s < 0: raise RuntimeError("HEAD_AUDIO_LATENCY_MS cannot be negative")
+        self.process = self.started = None
     def start(self) -> Callable[[], float]:
-        if not shutil.which("aplay"): raise RuntimeError("aplay is unavailable; install alsa-utils and check speaker setup")
-        self.process = self._popen(["aplay", str(self.wav_path)])
+        command = ["paplay", str(self.wav_path)] if self.backend == "pulse" else ["aplay", str(self.wav_path)]
+        self.process = self._popen(command)
         self.started = self._clock()
-        return lambda: self._clock() - self.started
+        return lambda: max(0.0, self._clock() - self.started - self.latency_s)
     def wait(self) -> int:
         return self.process.wait() if self.process else 0
     def stop(self) -> None:
         if self.process and self.process.poll() is None: self.process.terminate()
+
+# Backward-compatible name used by older callers.
+Aplay = AudioPlayer

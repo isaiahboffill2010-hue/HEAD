@@ -13,7 +13,7 @@ from src.mouth_calibration import calibrate_jaw, combined_test
 from src.mouth_animation import MouthAnimationEngine
 from src.talking_mouth import HELLO_SEQUENCE, talking_test
 from src.adaptive_lipsync import AdaptiveLipSynchronizer, MotionSettings, calibrated_max_jaw_travel
-from src.audio_sync import energy_events, word_events
+from src.audio_sync import AudioPlayer, energy_events, select_audio_backend, word_events
 from src.gemini_service import GeminiConfig, GeminiService, parse_word_timings, write_wav
 
 
@@ -383,6 +383,28 @@ class ServoControllerTests(unittest.TestCase):
             events = energy_events(path, window_s=0.1)
             self.assertEqual(events[0]["openness"], 0.0)
             self.assertEqual(events[-1]["openness"], 0.0)
+
+    def test_desktop_audio_backend_prefers_paplay_then_falls_back_to_aplay(self):
+        both = lambda command: f"/usr/bin/{command}"
+        alsa_only = lambda command: "/usr/bin/aplay" if command == "aplay" else None
+        self.assertEqual(select_audio_backend("auto", both), "pulse")
+        self.assertEqual(select_audio_backend("auto", alsa_only), "alsa")
+        self.assertEqual(select_audio_backend("alsa", both), "alsa")
+        with self.assertRaises(RuntimeError):
+            select_audio_backend("pulse", alsa_only)
+
+    def test_paplay_clock_applies_configured_bluetooth_latency_offset(self):
+        calls = []
+        class Process:
+            def wait(self): return 0
+            def poll(self): return 0
+        ticks = iter([10.0, 10.25])
+        player = AudioPlayer(Path("test.wav"), backend="pulse", latency_ms=100,
+                             popen=lambda command: calls.append(command) or Process(),
+                             clock=lambda: next(ticks), which=lambda _: "/usr/bin/paplay")
+        clock = player.start()
+        self.assertEqual(calls, [["paplay", "test.wav"]])
+        self.assertAlmostEqual(clock(), 0.15)
 
 
 if __name__ == "__main__":
