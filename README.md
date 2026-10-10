@@ -90,7 +90,7 @@ After the jaw endpoints are calibrated, run a single manually confirmed, speech-
 python3 -m src.talking_mouth test --speed 8
 ```
 
-The command reads the saved jaw endpoints from `config/servos.json`; it does not hardcode mouth angles or alter calibration. It displays the timed partial-opening plan, asks for each jaw's known current commanded angle and `POWERED` confirmation, then requires `TALK`. The sequence uses varying openness amounts and pauses, runs once, and ends closed. Speed must be between 1 and 12 degrees/second; 8 is the conservative default.
+The command reads the saved jaw endpoints from `config/servos.json`; it does not hardcode mouth angles or alter calibration. It displays the timed partial-opening plan, asks for each jaw's known current commanded angle and `POWERED` confirmation, then requires `TALK`. The sequence uses varying openness amounts and pauses, runs once, and ends closed. Speed must be positive and no higher than the configured software cap (or an already verified practical speed); 8 is the conservative default.
 
 No servo moves on startup or import. Ctrl+C cancels future movement. On interruption the program does **not** blindly command a close because jaw positions may be uncertain. If binding, strain, or resistance occurs, physically disconnect servo power immediately. The timing engine (`MouthAnimationEngine.animate(events)`) accepts future external `{ "time", "openness" }` events, while `MouthController` remains the hardware-bounded jaw layer. No audio, speech synthesis, or Gemini integration is included.
 
@@ -98,15 +98,15 @@ No servo moves on startup or import. Ctrl+C cancels future movement. On interrup
 
 `AdaptiveLipSynchronizer` is the playback-clock-driven layer intended for future Despina audio. Start it from the same monotonic reference used for real audio playback and pass external `{ "time", "openness" }` events. It uses the latest due target, skips stale targets rather than replaying them late, reduces rapid opening changes to achievable partial movement, and logs target-command timing drift at Python debug level. Long pause events with `openness: 0.0` close the mouth during speech pauses.
 
-Motion settings are in `config/mouth_motion.json`: the default is a conservative 8 degrees/second, with a 20 degrees/second **software** cap. Neither is a claim about the servos' physical maximum. Determine a practical maximum only through separate, supervised hardware testing; record it as `verified_practical_speed_dps` only after that test. The synchronizer rejects speeds above the cap or above a populated verified value. It keeps both jaws synchronized through their individual calibrated endpoints and never controls head/neck ports.
+Motion settings are in `config/mouth_motion.json`. Until hardware calibration, speech retains the conservative 8 degrees/second fallback. The 60 degrees/second **software** cap is only the upper boundary of the supervised test and is not a claim about the servos' physical maximum. The synchronizer uses a 20 ms playback-deadline loop and a 240 degrees/second-squared acceleration limit; servo write time is included in that deadline instead of being added as extra delay. It keeps both jaws synchronized through their individual calibrated endpoints and never controls head/neck ports.
 
-Use the already-confirmed, one-cycle mouth test for supervised speed testing, beginning at 8 and increasing only after a successful physical observation:
+Run the dedicated supervised calibration command. It starts at 8 degrees/second and offers 12, 16, 20, 25, 30, 40, 50, and 60 in order. Every cycle requires an exact `RUN <speed>` confirmation and is saved only after `PASS`. Stop at the first sign of strain, chatter, binding, heat, impact, or unreliable motion:
 
 ```bash
-python3 -m src.mouth_calibration test --speed 8
+python3 -m src.mouth_calibration speed
 ```
 
-Do not set `verified_practical_speed_dps` merely from a mock test. Stop and physically disconnect servo power if either jaw strains, binds, or chatters.
+Once a stage passes, its value is atomically saved as `verified_practical_speed_dps` and normal Gemini/Despina lip sync uses it automatically. Do not accept a stage from a mock test. Stop and physically disconnect servo power if either jaw strains, binds, or chatters.
 
 ## Phase 2: Gemini + Despina terminal chat
 
@@ -141,4 +141,4 @@ source .venv/bin/activate
 HEAD_AUDIO_BACKEND=pulse python3 -m src.robot_chat --voice-test
 ```
 
-`paplay` does not expose the Bluetooth speaker's actual acoustic latency. Mouth synchronization uses the audio-process playback clock and can apply an explicit estimate with `HEAD_AUDIO_LATENCY_MS` (for example, `HEAD_AUDIO_LATENCY_MS=180`). Measure and tune this only on your own speaker; Bluetooth latency may vary and can limit lip-sync precision.
+`paplay` does not expose the Bluetooth speaker's actual acoustic latency. Mouth synchronization uses the audio-process playback clock and can apply an explicit estimate with `HEAD_AUDIO_LATENCY_MS` (for example, `HEAD_AUDIO_LATENCY_MS=180`). A positive value delays mouth motion to match sound that emerges later from the speaker. Measure and tune this only on your own speaker; Bluetooth latency may vary and can limit lip-sync precision.

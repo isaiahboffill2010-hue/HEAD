@@ -9,10 +9,11 @@ from src.servo_controller import (ConfigurationError, LimitError, MockBackend,
     load_config, save_config)
 from src.calibration import align, center, preparation_text
 from src.mouth import MouthController
-from src.mouth_calibration import calibrate_jaw, combined_test
+from src.mouth_calibration import calibrate_jaw, combined_test, speed_calibration
 from src.mouth_animation import MouthAnimationEngine
 from src.talking_mouth import HELLO_SEQUENCE, talking_test
-from src.adaptive_lipsync import AdaptiveLipSynchronizer, MotionSettings, calibrated_max_jaw_travel
+from src.adaptive_lipsync import (AdaptiveLipSynchronizer, MotionSettings,
+    calibrated_max_jaw_travel, load_motion_settings)
 from src.audio_sync import AudioPlayer, energy_events, select_audio_backend, word_events
 from src.gemini_service import GeminiConfig, GeminiService, parse_word_timings, write_wav
 
@@ -251,9 +252,32 @@ class ServoControllerTests(unittest.TestCase):
         lower = ServoConfig("P10", 15, 1, None, None, 0, -1)
         controller = ServoController({"upper_jaw": upper, "lower_jaw": lower}, self.backend, sleep=lambda _: None)
         with self.assertRaises(ValueError):
-            talking_test({"upper_jaw": upper, "lower_jaw": lower}, controller, speed=21,
+            talking_test({"upper_jaw": upper, "lower_jaw": lower}, controller, speed=61,
                          input_func=lambda _: "unused")
         self.assertEqual(self.backend.commands, [])
+
+    def test_speed_calibration_progressively_saves_only_passed_stage(self):
+        upper = ServoConfig("P8", 1, 1, None, None, 3, 1)
+        lower = ServoConfig("P10", 15, 1, None, None, 12, -1)
+        controller = ServoController({"upper_jaw": upper, "lower_jaw": lower}, self.backend, sleep=lambda _: None)
+        answers = iter(["1", "POWERED", "15", "POWERED", "RUN 8", "PASS", "RUN 12", "STOP"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "motion.json"
+            path.write_text(json.dumps({
+                "conservative_speed_dps": 8.0,
+                "hard_software_speed_cap_dps": 60.0,
+                "acceleration_dps2": 240.0,
+                "update_interval_s": 0.02,
+                "verified_practical_speed_dps": None,
+            }))
+            result = speed_calibration(
+                {"upper_jaw": upper, "lower_jaw": lower}, controller, path,
+                input_func=lambda _: next(answers),
+            )
+            self.assertEqual(result, 0)
+            self.assertEqual(load_motion_settings(path).verified_practical_speed_dps, 8.0)
+        self.assertEqual(controller.position("upper_jaw"), 1)
+        self.assertEqual(controller.position("lower_jaw"), 15)
 
     def test_animation_cancellation_does_not_issue_a_recovery_close(self):
         class InterruptingMouth:

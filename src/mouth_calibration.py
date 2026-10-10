@@ -7,7 +7,9 @@ from pathlib import Path
 
 from .calibration import DEFAULT_CONFIG, SAFETY
 from .mouth import JAW_NAMES, MouthController
-from .adaptive_lipsync import load_motion_settings
+from dataclasses import replace
+
+from .adaptive_lipsync import DEFAULT_SETTINGS, load_motion_settings, save_motion_settings
 from .servo_controller import (ConfigurationError, MockBackend, RobotHatBackend,
     ServoController, ServoError, load_config, save_config)
 
@@ -126,6 +128,58 @@ def combined_test(configs, controller, speed: float, input_func=input) -> int:
     return 0
 
 
+def speed_calibration(configs, controller, path: Path = DEFAULT_SETTINGS, input_func=input) -> int:
+    """Supervised, progressively faster one-cycle jaw test.
+
+    Every stage requires an immediate RUN confirmation. A speed is persisted
+    only after the operator explicitly reports a clean, unstrained cycle.
+    """
+    settings = load_motion_settings(path)
+    for name in JAW_NAMES:
+        cfg = configs[name]
+        if cfg.neutral is None or cfg.opening_endpoint is None or cfg.opening_direction is None:
+            raise ConfigurationError(f"{name} opening range is not calibrated")
+    print("Mouth speed calibration: no command has been sent.")
+    print("Keep a hand at servo power. Stop for binding, chatter, heat, impact, or strain.")
+    for name in JAW_NAMES:
+        cfg = configs[name]
+        print(f"  {name}: closed {cfg.neutral:g} deg -> open {cfg.opening_endpoint:g} deg")
+        if not _known_reference(name, cfg, controller, input_func):
+            return 1
+        if controller.position(name) != cfg.neutral:
+            print("Speed calibration starts only with both jaws at saved closed neutral.")
+            return 1
+    stages = [speed for speed in (8, 12, 16, 20, 25, 30, 40, 50, 60)
+              if speed <= settings.hard_software_speed_cap_dps]
+    mouth = MouthController(controller)
+    accepted = settings.verified_practical_speed_dps
+    for speed in stages:
+        if accepted is not None and speed <= accepted:
+            continue
+        print(f"\nNext stage: one full open/close cycle at {speed:g} deg/s.")
+        command = input_func(f"Type RUN {speed:g} to execute, or STOP to finish: ").strip()
+        if command.upper() == "STOP":
+            break
+        if command != f"RUN {speed:g}":
+            print("Exact confirmation not entered; calibration stopped without movement at this stage.")
+            break
+        mouth.open(1.0, speed)
+        mouth.close(speed)
+        result = input_func("Type PASS only if motion was clean, or STOP: ").strip().upper()
+        if result != "PASS":
+            print("Stage not accepted; it was not saved. Disconnect power if anything looked unsafe.")
+            break
+        accepted = float(speed)
+        settings = replace(settings, verified_practical_speed_dps=accepted)
+        save_motion_settings(settings, path)
+        print(f"Accepted and saved {speed:g} deg/s as the verified practical speed.")
+    if accepted is None:
+        print("No speed was accepted; conservative speech speed remains in use.")
+    else:
+        print(f"Calibration finished. Normal lip sync will use {accepted:g} deg/s.")
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Safe individual jaw calibration and one-shot mouth test")
     parser.add_argument("--mock", action="store_true", help="print commands instead of using Robot HAT hardware")
@@ -136,6 +190,8 @@ def build_parser():
     test = sub.add_parser("test", help="run one confirmed open-and-close mouth cycle")
     test.add_argument("--speed", type=float, default=8.0,
                       help="degrees per second; capped by config/mouth_motion.json")
+    speed = sub.add_parser("speed", help="interactively test and save progressively faster mouth speeds")
+    speed.add_argument("--motion-config", type=Path, default=DEFAULT_SETTINGS)
     return parser
 
 
@@ -146,7 +202,9 @@ def main(argv=None) -> int:
         controller = ServoController(configs, MockBackend() if args.mock else RobotHatBackend())
         if args.command in JAW_BY_COMMAND:
             return calibrate_jaw(JAW_BY_COMMAND[args.command], configs, controller, args.config)
-        return combined_test(configs, controller, args.speed)
+        if args.command == "test":
+            return combined_test(configs, controller, args.speed)
+        return speed_calibration(configs, controller, args.motion_config)
     except KeyboardInterrupt:
         print("\nSTOPPED: no future commands will be sent. Disconnect servo power physically if unsafe.", file=sys.stderr)
         return 130
