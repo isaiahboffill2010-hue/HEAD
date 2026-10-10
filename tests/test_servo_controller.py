@@ -6,6 +6,7 @@ from pathlib import Path
 from src.servo_controller import (ConfigurationError, LimitError, MockBackend,
     NotCalibratedError, PositionUnknownError, ServoConfig, ServoController,
     load_config, save_config)
+from src.calibration import center, preparation_text
 
 
 class QuietMock(MockBackend):
@@ -63,6 +64,24 @@ class ServoControllerTests(unittest.TestCase):
             path.write_text(json.dumps({"servos": {"x": {"port": "P0", "neutral": None, "direction": 0, "min_angle": None, "max_angle": None}}}))
             with self.assertRaises(ConfigurationError):
                 load_config(path)
+
+    def test_preparation_includes_no_command_and_position_warning(self):
+        text = preparation_text("neck_pan", "P6")
+        self.assertIn("NO servo commands", text)
+        self.assertIn("cannot report their current shaft angle", text)
+        self.assertIn("Software cannot discover", text)
+
+    def test_center_refusal_sends_no_command(self):
+        result = center("neck_pan", {"neck_pan": self.cfg}, self.controller,
+                        input_func=lambda _: "no")
+        self.assertEqual(result, 1)
+        self.assertEqual(self.backend.commands, [])
+
+    def test_center_requires_confirmation_then_commands_zero(self):
+        result = center("neck_pan", {"neck_pan": self.cfg}, self.controller,
+                        input_func=lambda _: "CENTER")
+        self.assertEqual(result, 0)
+        self.assertEqual(self.backend.commands, [("P6", 0)])
 
 
 if __name__ == "__main__":

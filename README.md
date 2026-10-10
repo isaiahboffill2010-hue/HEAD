@@ -1,49 +1,42 @@
-# HEAD — Phase 1 servo control
+# HEAD - Phase 1 servo control
 
-Safety-first calibration and manual testing for five animatronic-head servos. Importing or starting the program never commands a servo.
+Importing or starting this safety-first application never commands a servo.
 
-## Raspberry Pi setup
+## Exact Raspberry Pi commands
+
+From the repository directory, run the first no-movement command:
 
 ```bash
-robot_hat version                 # expected: 2.5.8
+cd ~/HEAD
+python3 -m src.calibration prepare neck_pan
+```
+
+`prepare` only prints instructions. Standard positional servos cannot report their current shaft angle through the Robot HAT; software cannot discover or preserve the head's assembled physical position. Never guess an angle while a linkage is attached.
+
+For each servo (`neck_pan=P6`, `neck_tilt=P2`, `head_roll=P0`, `upper_jaw=P8`, `lower_jaw=P10`), do this one at a time:
+
+```bash
+# With servo power off: support head, disconnect only this linkage/horn.
+python3 -m src.calibration center neck_pan
+# Type CENTER only after the linkage is safely disengaged.
+
+# Power off again; put head in desired neutral pose; reattach without forcing.
+# Restore power, then re-establish the known centered baseline and calibrate.
+python3 -m src.calibration calibrate neck_pan
+```
+
+`center` never runs automatically and commands 0 degrees only after the immediate `CENTER` confirmation. `calibrate` requires you to type `CENTERED`, then requires `CENTER` immediately before it recommands that known baseline. Afterward only `+1`, `+2`, `-1`, and `-2` moves are permitted; set `min`, `max`, and `neutral`, then `save`.
+
+Keep fingers, wiring, cardboard, brackets, and tools clear. Stop if a servo strains, chatters, binds, or shifts the mechanism. Ctrl+C stops future software commands but cannot guarantee torque removal; physically disconnect servo power in an emergency.
+
+Run checks and mock-mode development with:
+
+```bash
+robot_hat version
 robot_hat doctor
 python3 -m unittest discover -s tests -v
 python3 -m compileall -q src tests
-python3 -m src.calibration list
+python -m src.calibration --mock prepare neck_pan
 ```
 
-The project uses only the standard library plus the installed `robot_hat`. Do not use `sudo` unless your Robot HAT installation specifically requires it.
-
-## Emergency and first-use safety
-
-Before movement, support the head, clear hands, wires, cardboard, brackets, and tools from every linkage, verify servo power, and keep its physical disconnect within reach. **Ctrl+C stops future commands, but software cannot guarantee immediate removal of servo torque. In an emergency, physically disconnect servo power.**
-
-No safe center is assumed. Configuration starts uncalibrated (`neutral`, `min_angle`, and `max_angle` are `null`). Calibration asks for an explicitly confirmed first absolute command and warns that it may cause a large movement. It then permits only 1° or 2° steps.
-
-The exact first command to run on the Raspberry Pi is:
-
-```bash
-cd "~/HEAD" && python3 -m src.calibration list
-```
-
-Adjust the path if needed. Then calibrate one servo at a time:
-
-```bash
-python3 -m src.calibration calibrate neck_pan
-python3 -m src.calibration calibrate neck_tilt
-python3 -m src.calibration calibrate head_roll
-python3 -m src.calibration calibrate upper_jaw
-python3 -m src.calibration calibrate lower_jaw
-```
-
-Use mock mode on Windows or without connected hardware:
-
-```bash
-python -m src.calibration --mock calibrate neck_pan
-```
-
-After calibration, manually test with `python3 -m src.calibration test neck_pan`. The test still requires confirmation and a known starting angle. Smooth movement defaults to 30 degrees/second in 1-degree commands; override it with `--speed 15`.
-
-During calibration, use `+1`, `+2`, `-1`, `-2`, `min`, `max`, `neutral`, `show`, `save`, or `quit`. Direction (`1` or `-1`) is selected before movement and maps logical angles to Robot HAT angles. Settings are atomically written to `config/servos.json`.
-
-This adapter targets SunFounder `robot_hat` 2.5.8: `Servo("P6")` constructs a channel and `Servo.angle(float)` accepts -90 to +90. Object creation configures PWM, but this project calls `angle()` only after movement confirmation.
+Use `python3 -m src.calibration test neck_pan --speed 15` only after the same mechanical-centering confirmation. Settings are saved atomically to `config/servos.json`.

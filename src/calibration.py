@@ -1,36 +1,67 @@
 """Interactive, one-servo-at-a-time calibration CLI."""
-
 from __future__ import annotations
-
 import argparse
 import sys
 from pathlib import Path
-
-from .servo_controller import (ConfigurationError, LimitError, MockBackend,
-    RobotHatBackend, ServoController, ServoError, load_config, save_config,
-    validate_config)
+from .servo_controller import (ConfigurationError, LimitError, MockBackend, RobotHatBackend, ServoController, ServoError, load_config, save_config, validate_config)
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config" / "servos.json"
 SAFETY = """SAFETY CHECK
-- Support the head so the selected joint cannot drop or pull the mechanism.
-- Clear hands, wires, cardboard, brackets, and tools from the full linkage path.
-- Verify servo power and keep its physical disconnect within immediate reach.
-- Ctrl+C stops future software commands; it cannot guarantee instant torque removal.
+- Support the head. Keep fingers, wires, cardboard, brackets, and tools clear.
+- Stop immediately if a servo strains, chatters, binds, or the mechanism shifts.
+- Keep the physical servo-power disconnect within immediate reach.
+- Ctrl+C stops future software commands only; it cannot guarantee torque removal.
   In an emergency, physically disconnect servo power."""
 
+def preparation_text(name: str, port: str) -> str:
+    return f"""PREPARATION ONLY: {name} on {port}
+This command sends NO servo commands.
 
-def confirmed_first_move() -> bool:
+Standard positional servos cannot report their current shaft angle through the
+Robot HAT. Software cannot discover or automatically preserve the head's
+current physical position. Do not guess an angle while the linkage is attached.
+
+Mechanical-centering procedure (one servo at a time):
+1. Support the head and power OFF the servo system.
+2. Temporarily disconnect only this servo's linkage or horn. Keep clear.
+3. With the linkage safely disengaged, run `center {name}` and type CENTER
+   immediately before it commands 0 degrees.
+4. Power OFF again. Set the head to the desired neutral pose by hand and
+   reattach the linkage/horn without forcing it.
+5. Restore servo power, run `calibrate {name}`, confirm the centered baseline,
+   and use only 1- or 2-degree steps to find conservative limits.
+
+Never continue if the servo strains or binds."""
+
+def confirmed_center_move(input_func=input) -> bool:
     print(SAFETY)
-    print("The first absolute command may produce a LARGE movement. No center is assumed.")
-    return input("After checking that the proposed angle is mechanically safe, type MOVE: ").strip() == "MOVE"
+    print("The next command is the known Robot HAT center: logical 0 degrees.")
+    print("It is safe only with this servo's linkage/horn disengaged or proven clear.")
+    return input_func("Type CENTER to command 0 degrees now: ").strip() == "CENTER"
 
+def center(name, configs, controller: ServoController, input_func=input) -> int:
+    cfg = configs[name]
+    print(preparation_text(name, cfg.port))
+    if not confirmed_center_move(input_func):
+        print("Confirmation not received; nothing moved.")
+        return 1
+    controller.establish_position(name, 0)
+    print("Center command sent. Power OFF servo power before reattaching the linkage/horn.")
+    return 0
 
-def read_angle(prompt: str) -> float:
-    value = float(input(prompt))
-    if not -90 <= value <= 90:
-        raise ValueError("angle must be between -90 and 90")
-    return value
-
+def calibrated_baseline(name, configs, controller: ServoController, input_func=input) -> bool:
+    print("This program cannot verify shaft position. Continue only after completing")
+    print("mechanical centering and reattaching the linkage at the desired neutral pose.")
+    print(SAFETY)
+    if input_func("Type CENTERED to confirm that procedure is complete: ").strip() != "CENTERED":
+        print("Mechanical centering was not confirmed; nothing moved.")
+        return False
+    if not confirmed_center_move(input_func):
+        print("Confirmation not received; nothing moved.")
+        return False
+    controller.establish_position(name, 0)
+    print("Centered baseline established at logical 0 degrees.")
+    return True
 
 def calibrate(name, configs, controller: ServoController, path: Path) -> int:
     cfg = configs[name]
@@ -41,31 +72,21 @@ def calibrate(name, configs, controller: ServoController, path: Path) -> int:
             print("Direction must be 1 or -1; nothing moved.", file=sys.stderr)
             return 2
         cfg.direction = int(direction_text)
-    try:
-        initial = read_angle("Enter a mechanically safe initial logical angle (-90..90): ")
-    except ValueError as exc:
-        print(f"Invalid angle: {exc}; nothing moved.", file=sys.stderr)
-        return 2
-    print(f"Proposed: {name} logical {initial:g}°, Robot HAT command {initial * cfg.direction:g}°.")
-    if not confirmed_first_move():
-        print("Confirmation not received; nothing moved.")
+    if not calibrated_baseline(name, configs, controller):
         return 1
-    controller.establish_position(name, initial)
-    print(f"Known starting position established at {initial:g}°.")
     print("Commands: +1, +2, -1, -2, min, max, neutral, show, save, quit")
     while True:
-        command = input(f"{name} [{controller.position(name):g}°]> ").strip().lower()
+        command = input(f"{name} [{controller.position(name):g} deg]> ").strip().lower()
         if command in {"+1", "+2", "-1", "-2"}:
             try:
                 position = controller.calibration_step(name, int(command))
-                print(f"Now {position:g}° (Robot HAT {position * cfg.direction:g}°).")
+                print(f"Now {position:g} deg (Robot HAT {position * cfg.direction:g} deg).")
             except ServoError as exc:
                 print(f"Rejected: {exc}")
         elif command in {"min", "max", "neutral"}:
             position = controller.position(name)
-            attr = "min_angle" if command == "min" else "max_angle" if command == "max" else "neutral"
-            setattr(cfg, attr, position)
-            print(f"Recorded {command} = {position:g}° in memory (not saved yet).")
+            setattr(cfg, "min_angle" if command == "min" else "max_angle" if command == "max" else "neutral", position)
+            print(f"Recorded {command} = {position:g} deg in memory (not saved yet).")
         elif command == "show":
             print(f"port={cfg.port}, direction={cfg.direction}, min={cfg.min_angle}, neutral={cfg.neutral}, max={cfg.max_angle}")
         elif command == "save":
@@ -83,31 +104,23 @@ def calibrate(name, configs, controller: ServoController, path: Path) -> int:
         else:
             print("Unknown command; use only the commands shown above.")
 
-
 def test_servo(name, configs, controller: ServoController, speed: float) -> int:
     cfg = configs[name]
     validate_config(name, cfg, require_calibrated=True)
-    print(f"Testing only {name} on {cfg.port}; calibrated range {cfg.min_angle}..{cfg.max_angle}°. No command has been sent.")
-    start = read_angle("Enter the servo's currently safe logical angle to establish position: ")
-    assert cfg.min_angle is not None and cfg.max_angle is not None
-    if not cfg.min_angle <= start <= cfg.max_angle:
-        raise LimitError("Starting angle is outside calibrated limits")
-    if not confirmed_first_move():
-        print("Confirmation not received; nothing moved.")
+    print(f"Testing only {name} on {cfg.port}; calibrated range {cfg.min_angle}..{cfg.max_angle} deg.")
+    if not calibrated_baseline(name, configs, controller):
         return 1
-    controller.establish_position(name, start)
     print("Enter targets within calibrated limits, or q to quit.")
     while True:
-        text = input(f"{name} [{controller.position(name):g}°] target> ").strip().lower()
+        text = input(f"{name} [{controller.position(name):g} deg] target> ").strip().lower()
         if text in {"q", "quit"}:
             return 0
         try:
             target = float(text)
             controller.move_to(name, target, speed_dps=speed)
-            print(f"Reached {target:g}°.")
+            print(f"Reached {target:g} deg.")
         except (ValueError, ServoError) as exc:
             print(f"Rejected: {exc}")
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Safe Robot HAT servo calibration")
@@ -115,13 +128,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("list", help="list configured servos and ports")
-    cal = sub.add_parser("calibrate", help="calibrate exactly one servo")
+    prep = sub.add_parser("prepare", help="show no-movement mechanical-centering instructions")
+    prep.add_argument("servo")
+    centered = sub.add_parser("center", help="explicitly command 0 deg with linkage disengaged")
+    centered.add_argument("servo")
+    cal = sub.add_parser("calibrate", help="calibrate one mechanically centered servo")
     cal.add_argument("servo")
-    test = sub.add_parser("test", help="manually test one calibrated servo")
+    test = sub.add_parser("test", help="manually test one calibrated, centered servo")
     test.add_argument("servo")
     test.add_argument("--speed", type=float, default=30.0)
     return parser
-
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
@@ -129,12 +145,16 @@ def main(argv=None) -> int:
         configs = load_config(args.config)
         if args.command == "list":
             for name, cfg in configs.items():
-                state = "calibrated" if cfg.calibrated else "UNCALIBRATED"
-                print(f"{name:<10} {cfg.port:<3} {state}")
+                print(f"{name:<10} {cfg.port:<3} {'calibrated' if cfg.calibrated else 'UNCALIBRATED'}")
             return 0
         if args.servo not in configs:
             raise ConfigurationError(f"Unknown servo {args.servo!r}; use the list command")
+        if args.command == "prepare":
+            print(preparation_text(args.servo, configs[args.servo].port))
+            return 0
         controller = ServoController(configs, MockBackend() if args.mock else RobotHatBackend())
+        if args.command == "center":
+            return center(args.servo, configs, controller)
         if args.command == "calibrate":
             return calibrate(args.servo, configs, controller, args.config)
         return test_servo(args.servo, configs, controller, args.speed)
@@ -144,7 +164,6 @@ def main(argv=None) -> int:
     except (ServoError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
