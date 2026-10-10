@@ -81,3 +81,15 @@ python3 -m src.mouth_calibration test --speed 8
 ```
 
 Enter the known current angle and `POWERED` confirmation for each jaw. The command shows both closed/open angles, requires `CYCLE`, smoothly opens both jaws once, and commands both back to their saved closed positions. Ctrl+C stops future commands; physically disconnect servo power in an emergency. The mouth controller is reusable through `MouthController.open(amount)`, `close()`, and `set_openness(amount)` for a future speech layer, but no speech or Gemini integration is included.
+
+## Phase 1C: talking-mouth animation
+
+After the jaw endpoints are calibrated, run a single manually confirmed, speech-like visual sequence:
+
+```bash
+python3 -m src.talking_mouth test --speed 8
+```
+
+The command reads the saved jaw endpoints from `config/servos.json`; it does not hardcode mouth angles or alter calibration. It displays the timed partial-opening plan, asks for each jaw's known current commanded angle and `POWERED` confirmation, then requires `TALK`. The sequence uses varying openness amounts and pauses, runs once, and ends closed. Speed must be between 1 and 12 degrees/second; 8 is the conservative default.
+
+No servo moves on startup or import. Ctrl+C cancels future movement. On interruption the program does **not** blindly command a close because jaw positions may be uncertain. If binding, strain, or resistance occurs, physically disconnect servo power immediately. The timing engine (`MouthAnimationEngine.animate(events)`) accepts future external `{ "time", "openness" }` events, while `MouthController` remains the hardware-bounded jaw layer. No audio, speech synthesis, or Gemini integration is included.

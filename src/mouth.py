@@ -41,6 +41,8 @@ class MouthController:
         if any(value is None for value in currents.values()):
             raise ConfigurationError("Both jaw starting positions must be explicitly established")
         max_delta = max(abs(targets[name] - currents[name]) for name in JAW_NAMES)  # type: ignore[operator]
+        if max_delta == 0:
+            return
         steps = max(1, math.ceil(max_delta))
         for index in range(1, steps + 1):
             fraction = index / steps

@@ -9,6 +9,8 @@ from src.servo_controller import (ConfigurationError, LimitError, MockBackend,
 from src.calibration import align, center, preparation_text
 from src.mouth import MouthController
 from src.mouth_calibration import calibrate_jaw, combined_test
+from src.mouth_animation import MouthAnimationEngine
+from src.talking_mouth import HELLO_SEQUENCE, talking_test
 
 
 class QuietMock(MockBackend):
@@ -220,6 +222,60 @@ class ServoControllerTests(unittest.TestCase):
         self.assertEqual(controller.position("upper_jaw"), 1)
         self.assertEqual(controller.position("lower_jaw"), 15)
         self.assertTrue(all(port in {"P8", "P10"} for port, _ in self.backend.commands))
+
+    def test_talking_animation_is_synchronized_bounded_and_ends_closed(self):
+        upper = ServoConfig("P8", 1, 1, None, None, 21, 1)
+        lower = ServoConfig("P10", 15, 1, None, None, 0, -1)
+        controller = ServoController({"upper_jaw": upper, "lower_jaw": lower}, self.backend, sleep=lambda _: None)
+        answers = iter(["1", "POWERED", "15", "POWERED", "TALK"])
+        mouth_factory = lambda ctl: MouthController(ctl, sleep=lambda _: None)
+        animation_factory = lambda mouth: MouthAnimationEngine(mouth, sleep=lambda _: None, clock=lambda: 0)
+        result = talking_test({"upper_jaw": upper, "lower_jaw": lower}, controller,
+                              speed=8, input_func=lambda _: next(answers),
+                              mouth_factory=mouth_factory, animation_factory=animation_factory)
+        self.assertEqual(result, 0)
+        self.assertEqual(controller.position("upper_jaw"), 1)
+        self.assertEqual(controller.position("lower_jaw"), 15)
+        upper_commands = [angle for port, angle in self.backend.commands if port == "P8"]
+        lower_commands = [angle for port, angle in self.backend.commands if port == "P10"]
+        self.assertTrue(all(1 <= angle <= 21 for angle in upper_commands))
+        self.assertTrue(all(0 <= angle <= 15 for angle in lower_commands))
+        self.assertTrue(all(port in {"P8", "P10"} for port, _ in self.backend.commands))
+
+    def test_talking_test_rejects_unsafe_speed_before_movement(self):
+        upper = ServoConfig("P8", 1, 1, None, None, 21, 1)
+        lower = ServoConfig("P10", 15, 1, None, None, 0, -1)
+        controller = ServoController({"upper_jaw": upper, "lower_jaw": lower}, self.backend, sleep=lambda _: None)
+        with self.assertRaises(ValueError):
+            talking_test({"upper_jaw": upper, "lower_jaw": lower}, controller, speed=13,
+                         input_func=lambda _: "unused")
+        self.assertEqual(self.backend.commands, [])
+
+    def test_animation_cancellation_does_not_issue_a_recovery_close(self):
+        class InterruptingMouth:
+            def __init__(self):
+                self.calls = []
+            def set_openness(self, amount, speed_dps=10):
+                self.calls.append((amount, speed_dps))
+                raise KeyboardInterrupt
+        mouth = InterruptingMouth()
+        engine = MouthAnimationEngine(mouth, sleep=lambda _: None, clock=lambda: 0)
+        with self.assertRaises(KeyboardInterrupt):
+            engine.animate(HELLO_SEQUENCE, speed_dps=8)
+        self.assertEqual(len(mouth.calls), 1)
+
+    def test_animation_events_and_speed_are_validated(self):
+        class RecordingMouth:
+            def __init__(self):
+                self.calls = []
+            def set_openness(self, amount, speed_dps=10):
+                self.calls.append((amount, speed_dps))
+        mouth = RecordingMouth()
+        engine = MouthAnimationEngine(mouth, sleep=lambda _: None, clock=lambda: 0)
+        with self.assertRaises(ValueError):
+            engine.animate(({"time": 0.0, "openness": 1.1}, {"time": 1.0, "openness": 0.0}))
+        with self.assertRaises(ValueError):
+            engine.animate(HELLO_SEQUENCE, speed_dps=13)
 
 
 if __name__ == "__main__":
