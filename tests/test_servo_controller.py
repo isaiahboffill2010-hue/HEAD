@@ -136,8 +136,36 @@ class ServoControllerTests(unittest.TestCase):
 
     def test_align_never_extends_beyond_absolute_hardware_limit(self):
         answers = iter(["-90", "POWERED", "-", "extend -", "quit"])
-        result = align("neck_pan", {"neck_pan": self.cfg}, self.controller,
+        self.controller.configs["head_roll"] = self.cfg
+        result = align("head_roll", {"head_roll": self.cfg}, self.controller,
                        Path("unused.json"), provisional_limit=1,
+                       input_func=lambda _: next(answers))
+        self.assertEqual(result, 0)
+        self.assertEqual(self.backend.commands, [])
+
+    def test_neck_pan_extends_negative_side_in_confirmed_five_degree_sections(self):
+        # Reach the initial -15 degree boundary with explicit 1-degree moves,
+        # then extend to -20. The extension itself must not write hardware.
+        answers = iter(["0", "POWERED"] + ["-"] * 15 + ["extend -", "CLEAR", "quit"])
+        result = align("neck_pan", {"neck_pan": self.cfg}, self.controller,
+                       Path("unused.json"), provisional_limit=15,
+                       input_func=lambda _: next(answers))
+        self.assertEqual(result, 0)
+        self.assertEqual(self.backend.commands, [("P6", angle) for angle in range(-1, -16, -1)])
+
+    def test_neck_pan_positive_alignment_boundary_stays_at_fifteen(self):
+        answers = iter(["0", "POWERED"] + ["+"] * 15 + ["extend +", "quit"])
+        result = align("neck_pan", {"neck_pan": self.cfg}, self.controller,
+                       Path("unused.json"), provisional_limit=15,
+                       input_func=lambda _: next(answers))
+        self.assertEqual(result, 0)
+        self.assertEqual(self.backend.commands, [("P6", angle) for angle in range(1, 16)])
+
+    def test_neck_pan_negative_alignment_boundary_never_exceeds_minus_eighty(self):
+        # A confirmed reference at -80 has no further negative software travel.
+        answers = iter(["-80", "POWERED", "extend -", "quit"])
+        result = align("neck_pan", {"neck_pan": self.cfg}, self.controller,
+                       Path("unused.json"), provisional_limit=15,
                        input_func=lambda _: next(answers))
         self.assertEqual(result, 0)
         self.assertEqual(self.backend.commands, [])

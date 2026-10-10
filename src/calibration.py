@@ -6,6 +6,11 @@ from pathlib import Path
 from .servo_controller import (ConfigurationError, LimitError, MockBackend, RobotHatBackend, ServoController, ServoError, load_config, save_config, validate_config)
 
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config" / "servos.json"
+# These are conservative software boundaries for alignment only. They are not
+# evidence of mechanically safe travel and are deliberately not saved as limits.
+ALIGNMENT_SOFTWARE_BOUNDARIES = {
+    "neck_pan": (-80.0, 15.0),
+}
 SAFETY = """SAFETY CHECK
 - Support the head. Keep fingers, wires, cardboard, brackets, and tools clear.
 - Stop immediately if a servo strains, chatters, binds, or the mechanism shifts.
@@ -88,9 +93,18 @@ def align(name, configs, controller: ServoController, path: Path,
         print("Reference not confirmed; nothing moved. Establish a safe reference with prepare/center first.")
         return 1
     controller.adopt_confirmed_position(name, start)
-    lower, upper = max(-90.0, start - provisional_limit), min(90.0, start + provisional_limit)
+    software_lower, software_upper = ALIGNMENT_SOFTWARE_BOUNDARIES.get(name, (-90.0, 90.0))
+    # neck_pan begins with +/-15 degrees; additional negative travel must use
+    # explicit five-degree extensions and cannot be bypassed with a CLI flag.
+    initial_limit = min(provisional_limit, 15.0) if name == "neck_pan" else provisional_limit
+    lower = max(software_lower, -90.0, start - initial_limit)
+    upper = min(software_upper, 90.0, start + initial_limit)
+    if lower > upper:
+        raise ValueError("confirmed reference is outside this servo's alignment software boundary")
     print(f"Trusted reference recorded without a servo command: {start:g} deg.")
     print(f"Provisional software window: {lower:g}..{upper:g} deg. No automatic sweep will occur.")
+    if name == "neck_pan":
+        print("neck_pan software boundary is -80..+15 deg; this is NOT a verified mechanical limit.")
     print("Commands: +, -, extend +, extend -, SAVE, quit")
     while True:
         command = input_func(f"{name} [{controller.position(name):g} deg]> ").strip()
@@ -118,9 +132,14 @@ def align(name, configs, controller: ServoController, path: Path,
                 print(f"Rejected: extend {'+' if direction > 0 else '-'} is allowed only at the current "
                       f"{'upper' if direction > 0 else 'lower'} boundary ({boundary:g} deg).")
                 continue
-            proposed = min(90.0, upper + 5.0) if direction > 0 else max(-90.0, lower - 5.0)
+            software_boundary = software_upper if direction > 0 else software_lower
+            hardware_boundary = 90.0 if direction > 0 else -90.0
+            proposed = min(hardware_boundary, software_boundary, upper + 5.0) if direction > 0 else max(hardware_boundary, software_boundary, lower - 5.0)
             if proposed == boundary:
-                print(f"Rejected: {boundary:g} deg is the absolute Robot HAT hardware limit.")
+                if boundary == software_boundary and software_boundary != hardware_boundary:
+                    print(f"Rejected: {boundary:g} deg is this servo's alignment software boundary, not a mechanical calibration.")
+                else:
+                    print(f"Rejected: {boundary:g} deg is the absolute Robot HAT hardware limit.")
                 continue
             print(SAFETY)
             print(f"Requesting 5 more degrees {'positive' if direction > 0 else 'negative'} travel: "
