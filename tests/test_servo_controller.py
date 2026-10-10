@@ -7,6 +7,8 @@ from src.servo_controller import (ConfigurationError, LimitError, MockBackend,
     NotCalibratedError, PositionUnknownError, ServoConfig, ServoController,
     load_config, save_config)
 from src.calibration import align, center, preparation_text
+from src.mouth import MouthController
+from src.mouth_calibration import calibrate_jaw, combined_test
 
 
 class QuietMock(MockBackend):
@@ -169,6 +171,55 @@ class ServoControllerTests(unittest.TestCase):
                        input_func=lambda _: next(answers))
         self.assertEqual(result, 0)
         self.assertEqual(self.backend.commands, [])
+
+    def test_jaw_calibration_saves_endpoint_and_preserves_neutral(self):
+        jaw = ServoConfig("P8", 1, 1, None, None)
+        controller = ServoController({"upper_jaw": jaw}, self.backend, sleep=lambda _: None)
+        answers = iter(["1", "POWERED", "+", "SAVE"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "servos.json"
+            result = calibrate_jaw("upper_jaw", {"upper_jaw": jaw}, controller, path,
+                                   input_func=lambda _: next(answers))
+            self.assertEqual(result, 0)
+            saved = load_config(path)["upper_jaw"]
+            self.assertEqual(saved.neutral, 1)
+            self.assertEqual(saved.opening_endpoint, 2)
+            self.assertEqual(saved.opening_direction, 1)
+        self.assertEqual(self.backend.commands, [("P8", 2)])
+
+    def test_jaw_calibration_unconfirmed_reference_sends_no_command(self):
+        jaw = ServoConfig("P10", 15, 1, None, None)
+        controller = ServoController({"lower_jaw": jaw}, self.backend, sleep=lambda _: None)
+        answers = iter(["15", "no"])
+        result = calibrate_jaw("lower_jaw", {"lower_jaw": jaw}, controller,
+                               Path("unused.json"), input_func=lambda _: next(answers))
+        self.assertEqual(result, 1)
+        self.assertEqual(self.backend.commands, [])
+
+    def test_mouth_controller_moves_only_jaws_and_returns_closed(self):
+        upper = ServoConfig("P8", 1, 1, None, None, 3, 1)
+        lower = ServoConfig("P10", 15, 1, None, None, 12, -1)
+        controller = ServoController({"upper_jaw": upper, "lower_jaw": lower}, self.backend, sleep=lambda _: None)
+        controller.adopt_confirmed_position("upper_jaw", 1)
+        controller.adopt_confirmed_position("lower_jaw", 15)
+        mouth = MouthController(controller, sleep=lambda _: None)
+        mouth.open(1.0, speed_dps=10)
+        mouth.close(speed_dps=10)
+        self.assertEqual(controller.position("upper_jaw"), 1)
+        self.assertEqual(controller.position("lower_jaw"), 15)
+        self.assertTrue(all(port in {"P8", "P10"} for port, _ in self.backend.commands))
+
+    def test_combined_test_requires_both_calibrated_jaws(self):
+        upper = ServoConfig("P8", 1, 1, None, None, 3, 1)
+        lower = ServoConfig("P10", 15, 1, None, None, 12, -1)
+        controller = ServoController({"upper_jaw": upper, "lower_jaw": lower}, self.backend, sleep=lambda _: None)
+        answers = iter(["1", "POWERED", "15", "POWERED", "CYCLE"])
+        result = combined_test({"upper_jaw": upper, "lower_jaw": lower}, controller,
+                               speed=10, input_func=lambda _: next(answers))
+        self.assertEqual(result, 0)
+        self.assertEqual(controller.position("upper_jaw"), 1)
+        self.assertEqual(controller.position("lower_jaw"), 15)
+        self.assertTrue(all(port in {"P8", "P10"} for port, _ in self.backend.commands))
 
 
 if __name__ == "__main__":

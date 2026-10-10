@@ -60,3 +60,24 @@ python -m src.calibration --mock prepare neck_pan
 ```
 
 Use `python3 -m src.calibration test neck_pan --speed 15` only after the same mechanical-centering confirmation. Settings are saved atomically to `config/servos.json`.
+
+## Phase 1B: mouth movement calibration
+
+The saved closed-mouth neutrals are `upper_jaw` P8 at +1 degrees and `lower_jaw` P10 at +15 degrees. These values are not changed by mouth calibration. Calibrate one jaw at a time; the tool never moves a servo on startup and it does not command neutral after a restart:
+
+```bash
+python3 -m src.mouth_calibration upper
+python3 -m src.mouth_calibration lower
+```
+
+For each jaw, enter its known current commanded angle and type `POWERED` only if power has remained continuously applied and the linkage was not repositioned. Then use `+` and `-` for explicit 1-degree movements to observe which direction opens it. The initial window is 5 degrees either side of closed neutral. At a boundary, inspect clearance and use `extend +` or `extend -`; each additional 5 degrees requires a fresh `CLEAR` confirmation and does not move the servo by itself. Type `STOP` for resistance, binding, or strain; disconnect servo power physically if unsafe.
+
+At a verified safe opening endpoint, type `SAVE`. It saves `opening_endpoint` and `opening_direction` while preserving the saved closed neutral. It does not calibrate general servo movement limits.
+
+After both jaws have endpoints, inspect the displayed plan and run exactly one slow, explicitly confirmed cycle:
+
+```bash
+python3 -m src.mouth_calibration test --speed 8
+```
+
+Enter the known current angle and `POWERED` confirmation for each jaw. The command shows both closed/open angles, requires `CYCLE`, smoothly opens both jaws once, and commands both back to their saved closed positions. Ctrl+C stops future commands; physically disconnect servo power in an emergency. The mouth controller is reusable through `MouthController.open(amount)`, `close()`, and `set_openness(amount)` for a future speech layer, but no speech or Gemini integration is included.

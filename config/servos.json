@@ -1,9 +1,9 @@
 {
   "servos": {
-    "neck_pan":  {"port": "P6",  "neutral": null, "direction": 1, "min_angle": null, "max_angle": null},
-    "neck_tilt": {"port": "P2",  "neutral": null, "direction": 1, "min_angle": null, "max_angle": null},
-    "head_roll": {"port": "P0",  "neutral": null, "direction": 1, "min_angle": null, "max_angle": null},
-    "upper_jaw": {"port": "P8",  "neutral": null, "direction": 1, "min_angle": null, "max_angle": null},
-    "lower_jaw": {"port": "P10", "neutral": null, "direction": 1, "min_angle": null, "max_angle": null}
+    "neck_pan":  {"port": "P6",  "neutral": -80, "direction": 1, "min_angle": null, "max_angle": null},
+    "neck_tilt": {"port": "P2",  "neutral": 17,  "direction": 1, "min_angle": null, "max_angle": null},
+    "head_roll": {"port": "P0",  "neutral": 70,  "direction": 1, "min_angle": null, "max_angle": null},
+    "upper_jaw": {"port": "P8",  "neutral": 1,   "direction": 1, "min_angle": null, "max_angle": null, "opening_endpoint": null, "opening_direction": null},
+    "lower_jaw": {"port": "P10", "neutral": 15,  "direction": 1, "min_angle": null, "max_angle": null, "opening_endpoint": null, "opening_direction": null}
   }
 }

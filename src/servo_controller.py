@@ -42,6 +42,8 @@ class ServoConfig:
     direction: int
     min_angle: float | None
     max_angle: float | None
+    opening_endpoint: float | None = None
+    opening_direction: int | None = None
 
     @property
     def calibrated(self) -> bool:
@@ -85,6 +87,22 @@ def validate_config(name: str, cfg: ServoConfig, require_calibrated: bool = True
     values = (cfg.neutral, cfg.min_angle, cfg.max_angle)
     if any(v is not None and (not isinstance(v, (int, float)) or not math.isfinite(v)) for v in values):
         raise ConfigurationError(f"{name}: angles must be finite numbers or null")
+    if cfg.opening_endpoint is not None and (
+        not isinstance(cfg.opening_endpoint, (int, float))
+        or not math.isfinite(cfg.opening_endpoint)
+        or not LIBRARY_MIN <= cfg.opening_endpoint <= LIBRARY_MAX
+    ):
+        raise ConfigurationError(f"{name}: opening endpoint must be a finite angle from -90 to 90 or null")
+    if cfg.opening_direction not in (None, -1, 1):
+        raise ConfigurationError(f"{name}: opening direction must be 1, -1, or null")
+    if (cfg.opening_endpoint is None) != (cfg.opening_direction is None):
+        raise ConfigurationError(f"{name}: opening endpoint and direction must be saved together")
+    if cfg.opening_endpoint is not None:
+        if cfg.neutral is None:
+            raise ConfigurationError(f"{name}: opening endpoint requires a neutral angle")
+        expected_direction = 1 if cfg.opening_endpoint > cfg.neutral else -1
+        if cfg.opening_endpoint == cfg.neutral or cfg.opening_direction != expected_direction:
+            raise ConfigurationError(f"{name}: opening endpoint must differ from neutral and match opening direction")
     if require_calibrated and not cfg.calibrated:
         raise NotCalibratedError(f"{name} is not fully calibrated")
     if cfg.calibrated:
@@ -205,6 +223,16 @@ class ServoController:
         self._positions[name] = target
         self._sleep(abs(delta) / speed_dps)
         return target
+
+    def move_confirmed_position(self, name: str, angle: float) -> None:
+        """Move from a previously established position; caller supplies its own safe range."""
+        if name not in self._positions:
+            raise PositionUnknownError("Starting position is unknown; establish or adopt it first")
+        cfg = self._get(name)
+        if not LIBRARY_MIN <= angle <= LIBRARY_MAX:
+            raise LimitError("Target must be between -90 and 90")
+        self.backend.write(cfg.port, self._library_angle(cfg, angle))
+        self._positions[name] = float(angle)
 
     def position(self, name: str) -> float | None:
         return self._positions.get(name)
