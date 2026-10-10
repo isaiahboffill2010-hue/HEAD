@@ -91,7 +91,7 @@ def align(name, configs, controller: ServoController, path: Path,
     lower, upper = max(-90.0, start - provisional_limit), min(90.0, start + provisional_limit)
     print(f"Trusted reference recorded without a servo command: {start:g} deg.")
     print(f"Provisional software window: {lower:g}..{upper:g} deg. No automatic sweep will occur.")
-    print("Commands: +, -, SAVE, quit")
+    print("Commands: +, -, extend +, extend -, SAVE, quit")
     while True:
         command = input_func(f"{name} [{controller.position(name):g} deg]> ").strip()
         if command in {"+", "+1"}:
@@ -110,12 +110,39 @@ def align(name, configs, controller: ServoController, path: Path,
         elif command.lower() in {"quit", "q"}:
             print("Left alignment without saving changes.")
             return 0
+        elif command.lower() in {"extend +", "extend -"}:
+            direction = 1 if command.endswith("+") else -1
+            current = controller.position(name)
+            boundary = upper if direction > 0 else lower
+            if current != boundary:
+                print(f"Rejected: extend {'+' if direction > 0 else '-'} is allowed only at the current "
+                      f"{'upper' if direction > 0 else 'lower'} boundary ({boundary:g} deg).")
+                continue
+            proposed = min(90.0, upper + 5.0) if direction > 0 else max(-90.0, lower - 5.0)
+            if proposed == boundary:
+                print(f"Rejected: {boundary:g} deg is the absolute Robot HAT hardware limit.")
+                continue
+            print(SAFETY)
+            print(f"Requesting 5 more degrees {'positive' if direction > 0 else 'negative'} travel: "
+                  f"{boundary:g}..{proposed:g} deg.")
+            print("Check full mechanism clearance now. Do not continue if there is any binding, strain, or resistance.")
+            if input_func("Type CLEAR to extend this side only (no movement will occur): ").strip() != "CLEAR":
+                print("Extension not confirmed; window unchanged and no movement sent.")
+                continue
+            if direction > 0:
+                upper = proposed
+            else:
+                lower = proposed
+            print(f"Provisional window extended to {lower:g}..{upper:g} deg. No movement was sent.")
+            continue
         else:
-            print("Unknown command; use +, -, SAVE, or quit.")
+            print("Unknown command; use +, -, extend +, extend -, SAVE, or quit.")
             continue
         target = controller.position(name) + delta
         if not lower <= target <= upper:
-            print(f"Rejected: {target:g} deg is outside provisional {lower:g}..{upper:g} deg window.")
+            needed = "extend +" if target > upper else "extend -"
+            print(f"Stopped at provisional {lower:g}..{upper:g} deg boundary; {target:g} deg is outside it.")
+            print(f"If this is the required direction, inspect clearance and request {needed}; it needs fresh confirmation.")
             continue
         try:
             position = controller.calibration_step(name, delta)

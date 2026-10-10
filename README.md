@@ -35,13 +35,15 @@ If a servo was already commanded to a known angle and has remained powered and p
 python3 -m src.calibration align neck_pan
 ```
 
-Enter `0` as the previously commanded angle, then type `POWERED` only if the servo has remained powered and has not been repositioned. This initial reference is recorded without sending a servo command. Then use only `+` and `-` for explicit one-degree moves; no sweep occurs. The default temporary software window is plus/minus 15 degrees from the reference. Set a smaller or larger conservative window (maximum 20 degrees) with:
+Enter `0` as the previously commanded angle, then type `POWERED` only if the servo has remained powered and has not been repositioned. This initial reference is recorded without sending a servo command. Then use only `+` and `-` for explicit one-degree moves; no sweep occurs. The default temporary software window is plus/minus 15 degrees from the reference. Set a smaller or larger initial conservative window (maximum 20 degrees) with:
 
 ```bash
 python3 -m src.calibration align neck_pan --provisional-limit 10
 ```
 
-When the head faces forward, type `SAVE`. This saves `neutral` only and deliberately clears movement limits: neutral alignment does **not** calibrate left/right travel. Later use the cautious `calibrate neck_pan` workflow to establish limits. If power was removed, the servo moved, or the horn/linkage was repositioned, do not use `align`; establish a safe reference with `prepare` and `center` instead.
+At a provisional boundary, the tool stops and identifies the limit. If more travel is necessary, inspect the full mechanism first, then enter `extend +` or `extend -` for the required direction. It permits only one additional 5-degree section per `CLEAR` confirmation, sends no movement while extending the window, and never goes beyond the Robot HAT's -90 to +90 degree range. Every extra section requires a fresh clearance check and `CLEAR` confirmation.
+
+When the head faces forward, type `SAVE`. This saves `neutral` only and deliberately clears movement limits: neutral alignment does **not** calibrate left/right travel. Later use the cautious `calibrate neck_pan` workflow to establish limits. If power was removed, the servo moved, or the horn/linkage was repositioned, do not use `align`; establish a safe reference with `prepare` and `center` instead. In particular, after the program exits or restarts, it does not assume the last servo position: explicitly verify the still-powered, untouched reference and enter it again before any movement.
 
 Keep fingers, wiring, cardboard, brackets, and tools clear. Stop if a servo strains, chatters, binds, or shifts the mechanism. Ctrl+C stops future software commands but cannot guarantee torque removal; physically disconnect servo power in an emergency.
 

@@ -116,6 +116,32 @@ class ServoControllerTests(unittest.TestCase):
         self.assertEqual(result, 0)
         self.assertEqual(self.backend.commands, [("P6", 1)])
 
+    def test_align_expands_only_after_boundary_and_fresh_clearance_confirmation(self):
+        answers = iter(["0", "POWERED", "-", "-", "extend -", "CLEAR", "-", "quit"])
+        result = align("neck_pan", {"neck_pan": self.cfg}, self.controller,
+                       Path("unused.json"), provisional_limit=1,
+                       input_func=lambda _: next(answers))
+        self.assertEqual(result, 0)
+        # The second '-' is blocked; extend itself sends no command. Only the
+        # initial step and the later explicitly requested step are written.
+        self.assertEqual(self.backend.commands, [("P6", -1), ("P6", -2)])
+
+    def test_align_rejected_extension_keeps_boundary_and_sends_nothing(self):
+        answers = iter(["0", "POWERED", "-", "extend -", "no", "-", "quit"])
+        result = align("neck_pan", {"neck_pan": self.cfg}, self.controller,
+                       Path("unused.json"), provisional_limit=1,
+                       input_func=lambda _: next(answers))
+        self.assertEqual(result, 0)
+        self.assertEqual(self.backend.commands, [("P6", -1)])
+
+    def test_align_never_extends_beyond_absolute_hardware_limit(self):
+        answers = iter(["-90", "POWERED", "-", "extend -", "quit"])
+        result = align("neck_pan", {"neck_pan": self.cfg}, self.controller,
+                       Path("unused.json"), provisional_limit=1,
+                       input_func=lambda _: next(answers))
+        self.assertEqual(result, 0)
+        self.assertEqual(self.backend.commands, [])
+
 
 if __name__ == "__main__":
     unittest.main()
