@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 
 from src.servo_controller import (ConfigurationError, LimitError, MockBackend,
@@ -12,6 +13,8 @@ from src.mouth_calibration import calibrate_jaw, combined_test
 from src.mouth_animation import MouthAnimationEngine
 from src.talking_mouth import HELLO_SEQUENCE, talking_test
 from src.adaptive_lipsync import AdaptiveLipSynchronizer, MotionSettings, calibrated_max_jaw_travel
+from src.audio_sync import energy_events, word_events
+from src.gemini_service import GeminiConfig, GeminiService, parse_word_timings, write_wav
 
 
 class QuietMock(MockBackend):
@@ -348,6 +351,38 @@ class ServoControllerTests(unittest.TestCase):
             sync.run(({"time": 0.0, "openness": 0.0}, {"time": 0.1, "openness": 1.0},
                       {"time": 1.0, "openness": 0.0}), lambda: next(times))
         self.assertEqual(mouth.calls, 1)
+
+    def test_gemini_response_history_and_despina_tts_wav_are_mocked(self):
+        class Models:
+            def generate_content(self, **kwargs):
+                self.kwargs = kwargs
+                return type("Response", (), {"text": "Hello from HEAD."})()
+        class Interactions:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                return type("Interaction", (), {"output_audio": type("Audio", (), {
+                    "data": b"RIFFtest", "mime_type": "audio/wav"})()})()
+        client = type("Client", (), {"models": Models(), "interactions": Interactions()})()
+        service = GeminiService(GeminiConfig("key", "chat", "tts", "Despina", "align"), client)
+        self.assertEqual(service.reply("Hi"), "Hello from HEAD.")
+        self.assertEqual(len(service.history), 2)
+        with tempfile.TemporaryDirectory() as directory:
+            path = service.synthesize("Hello", Path(directory) / "voice.wav")
+            self.assertEqual(path.read_bytes(), b"RIFFtest")
+        self.assertEqual(client.interactions.kwargs["generation_config"]["speech_config"][0]["voice"], "Despina")
+
+    def test_word_timing_parser_and_wav_energy_fallback(self):
+        self.assertEqual(parse_word_timings('[{"word":"hi","start":0,"end":0.2}]'), [{"start": 0.0, "end": 0.2}])
+        self.assertEqual(word_events([{"start": 0.1, "end": 0.3}]),
+                         [{"time": 0.0, "openness": 0.0}, {"time": 0.1, "openness": 0.55}, {"time": 0.3, "openness": 0.0}])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "audio.wav"
+            with wave.open(str(path), "wb") as out:
+                out.setnchannels(1); out.setsampwidth(2); out.setframerate(8000)
+                out.writeframes(b"\x00\x00" * 800 + b"\xff\x7f" * 800)
+            events = energy_events(path, window_s=0.1)
+            self.assertEqual(events[0]["openness"], 0.0)
+            self.assertEqual(events[-1]["openness"], 0.0)
 
 
 if __name__ == "__main__":

@@ -107,3 +107,24 @@ python3 -m src.mouth_calibration test --speed 8
 ```
 
 Do not set `verified_practical_speed_dps` merely from a mock test. Stop and physically disconnect servo power if either jaw strains, binds, or chatters.
+
+## Phase 2: Gemini + Despina terminal chat
+
+On the Pi, install the cloud SDK and ALSA player without changing the Robot HAT installation:
+
+```bash
+cd ~/HEAD
+python3 -m pip install --user -r requirements.txt
+sudo apt-get install -y alsa-utils
+cp .env.example .env.local
+nano .env.local
+```
+
+Put your Gemini API key in `.env.local`. It is ignored by Git. First verify the speaker and Gemini/Despina pipeline without servo motion:
+
+```bash
+robot_hat doctor
+python3 -m src.robot_chat --voice-only
+```
+
+Type a short message, then `quit`. Full mouth mode (`python3 -m src.robot_chat`) requires confirming that both jaws are continuously powered, unrepositioned, and currently at their saved closed neutral positions. `--mouth-test` speaks one test phrase after the same confirmations. The pipeline first tries word timing from the configured alignment model; if unavailable, the terminal reports its audio-energy fallback. Audio starts first, and the adaptive mouth synchronizer uses that playback clock—not a fixed animation. Ctrl+C stops future motion and audio; do not assume that it removes torque, so physically disconnect servo power if binding occurs.
