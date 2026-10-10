@@ -35,8 +35,8 @@ class MouthAnimationEngine:
 
     def animate(self, events: Sequence[Mapping[str, float]], speed_dps: float = 8.0) -> None:
         self.validate(events)
-        if not 1.0 <= speed_dps <= 12.0:
-            raise ValueError("speed must be between 1 and 12 degrees per second")
+        if speed_dps <= 0:
+            raise ValueError("speed must be positive")
         started = self._clock()
         for event in events:
             remaining = event["time"] - (self._clock() - started)

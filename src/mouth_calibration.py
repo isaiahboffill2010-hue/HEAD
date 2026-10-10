@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .calibration import DEFAULT_CONFIG, SAFETY
 from .mouth import JAW_NAMES, MouthController
+from .adaptive_lipsync import load_motion_settings
 from .servo_controller import (ConfigurationError, MockBackend, RobotHatBackend,
     ServoController, ServoError, load_config, save_config)
 
@@ -102,6 +103,7 @@ def calibrate_jaw(name, configs, controller, path: Path, input_func=input) -> in
 
 
 def combined_test(configs, controller, speed: float, input_func=input) -> int:
+    load_motion_settings().speed(speed)
     for name in JAW_NAMES:
         cfg = configs[name]
         if cfg.neutral is None or cfg.opening_endpoint is None or cfg.opening_direction is None:
@@ -132,7 +134,8 @@ def build_parser():
     sub.add_parser("upper", help="calibrate upper jaw only")
     sub.add_parser("lower", help="calibrate lower jaw only")
     test = sub.add_parser("test", help="run one confirmed open-and-close mouth cycle")
-    test.add_argument("--speed", type=float, default=8.0, help="slow maximum degrees per second")
+    test.add_argument("--speed", type=float, default=8.0,
+                      help="degrees per second; capped by config/mouth_motion.json")
     return parser
 
 

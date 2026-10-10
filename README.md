@@ -93,3 +93,17 @@ python3 -m src.talking_mouth test --speed 8
 The command reads the saved jaw endpoints from `config/servos.json`; it does not hardcode mouth angles or alter calibration. It displays the timed partial-opening plan, asks for each jaw's known current commanded angle and `POWERED` confirmation, then requires `TALK`. The sequence uses varying openness amounts and pauses, runs once, and ends closed. Speed must be between 1 and 12 degrees/second; 8 is the conservative default.
 
 No servo moves on startup or import. Ctrl+C cancels future movement. On interruption the program does **not** blindly command a close because jaw positions may be uncertain. If binding, strain, or resistance occurs, physically disconnect servo power immediately. The timing engine (`MouthAnimationEngine.animate(events)`) accepts future external `{ "time", "openness" }` events, while `MouthController` remains the hardware-bounded jaw layer. No audio, speech synthesis, or Gemini integration is included.
+
+## Adaptive lip synchronization (Phase 2 preparation)
+
+`AdaptiveLipSynchronizer` is the playback-clock-driven layer intended for future Despina audio. Start it from the same monotonic reference used for real audio playback and pass external `{ "time", "openness" }` events. It uses the latest due target, skips stale targets rather than replaying them late, reduces rapid opening changes to achievable partial movement, and logs target-command timing drift at Python debug level. Long pause events with `openness: 0.0` close the mouth during speech pauses.
+
+Motion settings are in `config/mouth_motion.json`: the default is a conservative 8 degrees/second, with a 20 degrees/second **software** cap. Neither is a claim about the servos' physical maximum. Determine a practical maximum only through separate, supervised hardware testing; record it as `verified_practical_speed_dps` only after that test. The synchronizer rejects speeds above the cap or above a populated verified value. It keeps both jaws synchronized through their individual calibrated endpoints and never controls head/neck ports.
+
+Use the already-confirmed, one-cycle mouth test for supervised speed testing, beginning at 8 and increasing only after a successful physical observation:
+
+```bash
+python3 -m src.mouth_calibration test --speed 8
+```
+
+Do not set `verified_practical_speed_dps` merely from a mock test. Stop and physically disconnect servo power if either jaw strains, binds, or chatters.

@@ -53,6 +53,19 @@ class MouthController:
                 self.controller.move_confirmed_position(name, target)
             self._sleep(1.0 / speed_dps)
 
+    def set_openness_step(self, amount: float) -> None:
+        """Write one already-rate-limited synchronized mouth target without sleeping.
+
+        AdaptiveLipSynchronizer supplies the acceleration and speed profile;
+        this method only maps the safe 0..1 openness fraction to calibrated
+        jaw endpoints.
+        """
+        targets = {name: self.target_angle(name, amount) for name in JAW_NAMES}
+        if any(self.controller.position(name) is None for name in JAW_NAMES):
+            raise ConfigurationError("Both jaw starting positions must be explicitly established")
+        for name in JAW_NAMES:
+            self.controller.move_confirmed_position(name, targets[name])
+
     def open(self, amount: float = 0.5, speed_dps: float = 10.0) -> None:
         self.set_openness(amount, speed_dps)
 

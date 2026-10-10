@@ -8,6 +8,7 @@ from pathlib import Path
 from .calibration import DEFAULT_CONFIG, SAFETY
 from .mouth import JAW_NAMES, MouthController
 from .mouth_animation import MouthAnimationEngine
+from .adaptive_lipsync import load_motion_settings
 from .mouth_calibration import _known_reference
 from .servo_controller import (ConfigurationError, MockBackend, RobotHatBackend,
     ServoController, ServoError, load_config)
@@ -50,8 +51,7 @@ def show_plan(configs) -> None:
 def talking_test(configs, controller, speed: float, input_func=input,
                  mouth_factory=MouthController, animation_factory=MouthAnimationEngine) -> int:
     ensure_jaws_calibrated(configs)
-    if not 1.0 <= speed <= 12.0:
-        raise ValueError("speed must be between 1 and 12 degrees per second")
+    load_motion_settings().speed(speed)
     print("Talking-mouth test: no command has been sent.")
     show_plan(configs)
     for name in JAW_NAMES:
@@ -76,7 +76,7 @@ def build_parser():
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     sub = parser.add_subparsers(dest="command", required=True)
     test = sub.add_parser("test", help="run one confirmed speech-like mouth sequence")
-    test.add_argument("--speed", type=float, default=8.0, help="degrees per second (1..12; default 8)")
+    test.add_argument("--speed", type=float, default=8.0, help="degrees per second; capped by config/mouth_motion.json")
     return parser
 
 

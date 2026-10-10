@@ -1,0 +1,7 @@
+{
+  "conservative_speed_dps": 8.0,
+  "hard_software_speed_cap_dps": 20.0,
+  "acceleration_dps2": 24.0,
+  "update_interval_s": 0.05,
+  "verified_practical_speed_dps": null
+}

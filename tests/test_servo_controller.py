@@ -11,6 +11,7 @@ from src.mouth import MouthController
 from src.mouth_calibration import calibrate_jaw, combined_test
 from src.mouth_animation import MouthAnimationEngine
 from src.talking_mouth import HELLO_SEQUENCE, talking_test
+from src.adaptive_lipsync import AdaptiveLipSynchronizer, MotionSettings, calibrated_max_jaw_travel
 
 
 class QuietMock(MockBackend):
@@ -247,7 +248,7 @@ class ServoControllerTests(unittest.TestCase):
         lower = ServoConfig("P10", 15, 1, None, None, 0, -1)
         controller = ServoController({"upper_jaw": upper, "lower_jaw": lower}, self.backend, sleep=lambda _: None)
         with self.assertRaises(ValueError):
-            talking_test({"upper_jaw": upper, "lower_jaw": lower}, controller, speed=13,
+            talking_test({"upper_jaw": upper, "lower_jaw": lower}, controller, speed=21,
                          input_func=lambda _: "unused")
         self.assertEqual(self.backend.commands, [])
 
@@ -275,7 +276,78 @@ class ServoControllerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             engine.animate(({"time": 0.0, "openness": 1.1}, {"time": 1.0, "openness": 0.0}))
         with self.assertRaises(ValueError):
-            engine.animate(HELLO_SEQUENCE, speed_dps=13)
+            engine.animate(HELLO_SEQUENCE, speed_dps=0)
+
+    def test_adaptive_lipsync_skips_expired_fast_targets_and_reduces_amplitude(self):
+        class FakeClock:
+            now = 0.0
+            def clock(self):
+                return self.now
+            def sleep(self, duration):
+                self.now += duration
+        class RecordingMouth:
+            def __init__(self):
+                self.targets = []
+            def set_openness_step(self, amount):
+                self.targets.append(amount)
+        fake = FakeClock()
+        mouth = RecordingMouth()
+        settings = MotionSettings(8, 20, 24, 0.05, None)
+        sync = AdaptiveLipSynchronizer(mouth, 20, settings, sleep=fake.sleep)
+        records = sync.run((
+            {"time": 0.0, "openness": 0.0},
+            {"time": 0.01, "openness": 1.0},
+            {"time": 0.02, "openness": 0.0},
+            {"time": 0.30, "openness": 0.0},
+        ), fake.clock)
+        self.assertTrue(any(record.skipped for record in records))
+        self.assertTrue(any(record.amplitude_reduced for record in records))
+        self.assertTrue(all(0 <= target <= 1 for target in mouth.targets))
+
+    def test_adaptive_lipsync_synchronizes_jaws_and_closes_in_long_pause(self):
+        class FakeClock:
+            now = 0.0
+            def clock(self):
+                return self.now
+            def sleep(self, duration):
+                self.now += duration
+        upper = ServoConfig("P8", 1, 1, None, None, 21, 1)
+        lower = ServoConfig("P10", 15, 1, None, None, 0, -1)
+        controller = ServoController({"upper_jaw": upper, "lower_jaw": lower}, self.backend, sleep=lambda _: None)
+        controller.adopt_confirmed_position("upper_jaw", 1)
+        controller.adopt_confirmed_position("lower_jaw", 15)
+        fake = FakeClock()
+        mouth = MouthController(controller, sleep=lambda _: None)
+        sync = AdaptiveLipSynchronizer(
+            mouth, calibrated_max_jaw_travel({"upper_jaw": upper, "lower_jaw": lower}),
+            MotionSettings(8, 20, 40, 0.05, None), sleep=fake.sleep,
+        )
+        sync.run((
+            {"time": 0.0, "openness": 0.0},
+            {"time": 0.20, "openness": 0.4},
+            {"time": 2.50, "openness": 0.0},
+            {"time": 4.00, "openness": 0.0},
+        ), fake.clock)
+        self.assertAlmostEqual(controller.position("upper_jaw"), 1, places=3)
+        self.assertAlmostEqual(controller.position("lower_jaw"), 15, places=3)
+        self.assertTrue(all(port in {"P8", "P10"} for port, _ in self.backend.commands))
+        self.assertEqual(len(self.backend.commands) % 2, 0)
+        self.assertTrue(all(self.backend.commands[i][0:1] == ("P8",) and self.backend.commands[i + 1][0:1] == ("P10",)
+                            for i in range(0, len(self.backend.commands), 2)))
+
+    def test_adaptive_lipsync_cancellation_sends_no_recovery_close(self):
+        class InterruptingMouth:
+            calls = 0
+            def set_openness_step(self, amount):
+                self.calls += 1
+                raise KeyboardInterrupt
+        mouth = InterruptingMouth()
+        sync = AdaptiveLipSynchronizer(mouth, 20, MotionSettings(8, 20, 40, 0.05, None), sleep=lambda _: None)
+        times = iter([0.0, 0.1])
+        with self.assertRaises(KeyboardInterrupt):
+            sync.run(({"time": 0.0, "openness": 0.0}, {"time": 0.1, "openness": 1.0},
+                      {"time": 1.0, "openness": 0.0}), lambda: next(times))
+        self.assertEqual(mouth.calls, 1)
 
 
 if __name__ == "__main__":
