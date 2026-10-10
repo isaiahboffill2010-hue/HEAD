@@ -1,0 +1,2 @@
+# robot_hat==2.5.8 is installed separately by SunFounder's official installer.
+# No additional third-party dependencies.

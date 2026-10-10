@@ -1,0 +1,9 @@
+{
+  "servos": {
+    "neck_pan":  {"port": "P6",  "neutral": null, "direction": 1, "min_angle": null, "max_angle": null},
+    "neck_tilt": {"port": "P2",  "neutral": null, "direction": 1, "min_angle": null, "max_angle": null},
+    "head_roll": {"port": "P0",  "neutral": null, "direction": 1, "min_angle": null, "max_angle": null},
+    "upper_jaw": {"port": "P8",  "neutral": null, "direction": 1, "min_angle": null, "max_angle": null},
+    "lower_jaw": {"port": "P10", "neutral": null, "direction": 1, "min_angle": null, "max_angle": null}
+  }
+}
