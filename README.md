@@ -141,7 +141,13 @@ source .venv/bin/activate
 HEAD_AUDIO_BACKEND=pulse python3 -m src.robot_chat --voice-test
 ```
 
-`paplay` does not expose the Bluetooth speaker's actual acoustic latency. Mouth synchronization uses the audio-process playback clock and can apply an explicit estimate with `HEAD_AUDIO_LATENCY_MS` (for example, `HEAD_AUDIO_LATENCY_MS=180`). A positive value delays mouth motion to match sound that emerges later from the speaker. Measure and tune this only on your own speaker; Bluetooth latency may vary and can limit lip-sync precision.
+`paplay` does not expose the Bluetooth speaker's actual acoustic latency. Mouth synchronization uses the audio-process playback clock and can apply an explicit estimate with `HEAD_AUDIO_LATENCY_MS` (for example, `HEAD_AUDIO_LATENCY_MS=180`). A positive value delays mouth motion to match sound that emerges later from the speaker. If the final words still outlast mouth motion, add `HEAD_MOUTH_OFFSET_MS` (initially `0`) as a separate, mouth-only delay. It is added once after the audio-latency estimate; do not add it to `HEAD_AUDIO_LATENCY_MS` as well. The terminal prints an estimated final audible timestamp and the final speech-bearing mouth command; Bluetooth acoustic timing remains an estimate.
+
+To compare safe timing offsets without changing servo speed, endpoints, or calibration files, use the supervised command below. It speaks one short phrase only after each exact confirmation at 0, 100, 200, and 300 ms; choose the smallest offset that keeps movement present for the final words, then manually set that value in `.env.local`.
+
+```bash
+python3 -m src.robot_chat --streaming --mouth-offset-calibration
+```
 
 ## Reliable and streaming conversation modes
 

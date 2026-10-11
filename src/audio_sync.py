@@ -104,6 +104,7 @@ class PlaybackDiagnostics:
     producer_error: str | None = None
     dropped_chunks: int = 0
     last_pcm_submitted_at: float | None = None
+    playback_started_at: float | None = None
     playback_completed_at: float | None = None
 
 def select_audio_backend(requested: str | None = None, which: Callable[[str], str | None] = shutil.which) -> str:
@@ -208,6 +209,7 @@ class RawPCMPlayer:
                 enqueue(sentinel)
 
         self.process = self._popen(self._command(), stdin=subprocess.PIPE, bufsize=0)
+        self.diagnostics.playback_started_at = self._clock()
         if on_ready:
             on_ready()
         producer = threading.Thread(target=produce, name="despina-stream", daemon=True)

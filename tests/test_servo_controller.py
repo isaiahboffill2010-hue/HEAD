@@ -563,6 +563,31 @@ class ServoControllerTests(unittest.TestCase):
         self.assertIsNotNone(sync.diagnostics.last_speech_frame_audio_s)
         self.assertIsNotNone(sync.diagnostics.last_mouth_frame_processed_at)
 
+    def test_mouth_only_offset_is_added_once_after_audio_latency(self):
+        class Mouth:
+            def set_openness_step(self, value): pass
+        sync = StreamingLipSynchronizer(Mouth(), 20, MotionSettings(25, 60, 240, .02, 25),
+                                        latency_ms=180, mouth_offset_ms=100)
+        self.assertAlmostEqual(sync.latency_s, .18)
+        self.assertAlmostEqual(sync.mouth_offset_s, .1)
+        self.assertAlmostEqual(sync.effective_delay_s, .28)
+
+    def test_final_mouth_diagnostic_compares_audible_estimate(self):
+        import time
+        class Mouth:
+            def __init__(self): self.targets = []
+            def set_openness_step(self, value): self.targets.append(value)
+        mouth = Mouth()
+        sync = StreamingLipSynchronizer(mouth, 20, MotionSettings(25, 60, 240, .02, 25),
+                                        latency_ms=10, mouth_offset_ms=40)
+        started = time.monotonic(); sync.start()
+        sync.submit(b"\xff\x7f" * 480, 0.0)
+        sync.finish(playback_started_at=started)
+        self.assertIsNotNone(sync.diagnostics.final_audible_audio_estimate_at)
+        self.assertIsNotNone(sync.diagnostics.last_speech_mouth_command_at)
+        self.assertGreater(sync.diagnostics.last_speech_mouth_command_at -
+                           sync.diagnostics.final_audible_audio_estimate_at, .015)
+
     def test_delayed_final_tts_chunk_is_processed_before_worker_shutdown(self):
         import time
         class Mouth:

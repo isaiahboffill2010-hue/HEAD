@@ -49,6 +49,11 @@ def _print_diagnostics(text, segments, diagnostics, *, mode, audio_path=None, al
         print("  final TTS PCM frame timestamp: " + str(detail.final_tts_pcm_received_at))
         print("  last speech-bearing frame timestamp: " + str(detail.last_speech_frame_audio_s))
         print("  last scheduled mouth movement timestamp: " + str(detail.last_scheduled_mouth_at))
+        print("  estimated final audible-audio timestamp: " + str(detail.final_audible_audio_estimate_at))
+        print("  last speech-bearing mouth command timestamp: " + str(detail.last_speech_mouth_command_at))
+        if detail.final_audible_audio_estimate_at and detail.last_speech_mouth_command_at:
+            delta = (detail.last_speech_mouth_command_at - detail.final_audible_audio_estimate_at) * 1000
+            print(f"  final mouth-vs-audible estimate: {delta:+.1f} ms")
         print("  audio playback completion timestamp: " + str(detail.playback_completed_at))
         print("  last mouth-frame processing timestamp: " + str(detail.last_mouth_frame_processed_at))
         print(f"  mouth worker shutdown reason: {detail.shutdown_reason or 'not finished'}")
@@ -113,11 +118,12 @@ def speak_reliable(text, service: GeminiService, *, mouth=None, configs=None, tr
 
 
 def speak_streaming(text, service: GeminiService, *, mouth=None, configs=None, trace=None,
-                    debug_audio=False, player_factory=RawPCMPlayer):
+                    debug_audio=False, player_factory=RawPCMPlayer, mouth_offset_ms=None):
     """One ordered TTS stream for the entire completed response."""
     player = player_factory(); lip = None; capture = bytearray(); saved = None; lip_finished = False
     if mouth is not None:
-        lip = StreamingLipSynchronizer(mouth, calibrated_max_jaw_travel(configs), load_motion_settings())
+        lip = StreamingLipSynchronizer(mouth, calibrated_max_jaw_travel(configs), load_motion_settings(),
+                                       mouth_offset_ms=mouth_offset_ms)
     def chunks():
         if trace: trace.mark("tts_request")
         first = True
@@ -144,7 +150,8 @@ def speak_streaming(text, service: GeminiService, *, mouth=None, configs=None, t
         if lip:
             # RawPCMPlayer has drained paplay/aplay before returning.  Drain the
             # mouth queue as well; do not treat TTS end-of-stream as mouth EOS.
-            lip.finish(player.diagnostics.playback_completed_at)
+            lip.finish(player.diagnostics.playback_completed_at,
+                       playback_started_at=player.diagnostics.playback_started_at)
             lip_finished = True
         if lip and trace: trace.add_ms("Speech alignment", lip.analysis_ms)
         if lip: player.diagnostics.dropped_chunks = lip.dropped_chunks
@@ -168,6 +175,24 @@ def speak_streaming(text, service: GeminiService, *, mouth=None, configs=None, t
 
 
 speak = speak_reliable
+
+
+def calibrate_mouth_offset(service, mouth, configs, input_func=input) -> int:
+    """Supervised physical timing comparison; it never changes calibration or speed."""
+    print("Mouth-offset calibration changes no servo endpoint, speed, or config file.")
+    print("Keep clear of the mechanism and stop if either jaw strains, chatters, or binds.")
+    phrase = "Please watch the final words of this sentence."
+    for offset in (0, 100, 200, 300):
+        command = input_func(f"Type TEST {offset} to speak once at a {offset} ms mouth-only delay, or STOP: ").strip()
+        if command == "STOP":
+            break
+        if command != f"TEST {offset}":
+            print("Skipped; no servo or audio command was sent.")
+            continue
+        speak_streaming(phrase, service, mouth=mouth, configs=configs, mouth_offset_ms=offset)
+        print("Observe the final words. Choose the smallest offset that prevents an early mouth stop.")
+    print("Set only the selected value in .env.local as HEAD_MOUTH_OFFSET_MS; no setting was saved.")
+    return 0
 
 
 def run_session(service, *, voice_only, mode="reliable", mouth=None, configs=None,
@@ -197,6 +222,8 @@ def main(argv=None):
     modes.add_argument("--streaming", action="store_true", help="lower-latency incremental energy mode")
     parser.add_argument("--voice-only", action="store_true")
     parser.add_argument("--mouth-test", action="store_true")
+    parser.add_argument("--mouth-offset-calibration", action="store_true",
+                        help="supervised 0/100/200/300 ms jaw-only timing comparison")
     parser.add_argument("--voice-test", action="store_true")
     parser.add_argument("--debug-audio", action="store_true")
     parser.add_argument("--skip-model-check", action="store_true")
@@ -212,6 +239,8 @@ def main(argv=None):
         controller = ServoController(configs, RobotHatBackend())
         if not establish_mouth(configs, controller): return 1
         mouth = MouthController(controller)
+        if args.mouth_offset_calibration:
+            return calibrate_mouth_offset(service, mouth, configs)
         if args.mouth_test:
             (speak_streaming if mode == "streaming" else speak_reliable)(
                 "Hello, this is a short mouth synchronization test.", service,

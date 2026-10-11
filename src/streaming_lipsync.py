@@ -18,7 +18,10 @@ class StreamingLipSyncDiagnostics:
     final_tts_pcm_received_at: float | None = None
     final_pcm_audio_end_s: float | None = None
     last_speech_frame_audio_s: float | None = None
+    last_speech_audio_end_s: float | None = None
     last_scheduled_mouth_at: float | None = None
+    last_speech_mouth_command_at: float | None = None
+    final_audible_audio_estimate_at: float | None = None
     playback_completed_at: float | None = None
     last_mouth_frame_processed_at: float | None = None
     dropped_frames: int = 0
@@ -34,7 +37,7 @@ class StreamingLipSynchronizer:
     """
     def __init__(self, mouth, max_jaw_travel_deg: float, settings: MotionSettings,
                  sample_rate: int = 24000, clock=time.monotonic,
-                 latency_ms: float | None = None) -> None:
+                 latency_ms: float | None = None, mouth_offset_ms: float | None = None) -> None:
         self.mouth, self.settings = mouth, settings
         self.sample_rate, self.clock = sample_rate, clock
         self.max_jaw_travel_deg = max_jaw_travel_deg
@@ -51,6 +54,11 @@ class StreamingLipSynchronizer:
         self._logger = logging.getLogger(__name__)
         value = float(os.getenv("HEAD_AUDIO_LATENCY_MS", "0")) if latency_ms is None else latency_ms
         self.latency_s = max(0.0, value / 1000)
+        offset = float(os.getenv("HEAD_MOUTH_OFFSET_MS", "0")) if mouth_offset_ms is None else mouth_offset_ms
+        if offset < 0:
+            raise ValueError("HEAD_MOUTH_OFFSET_MS cannot be negative")
+        self.mouth_offset_s = offset / 1000
+        self.effective_delay_s = self.latency_s + self.mouth_offset_s
 
     def start(self) -> None:
         self._started = self._last = self.clock()
@@ -82,7 +90,7 @@ class StreamingLipSynchronizer:
                 self.diagnostics.shutdown_reason = "cancelled" if self.cancelled.is_set() else "drained end-of-stream"
                 break
             pcm, audio_time = item
-            due = (self._started or self.clock()) + self.latency_s + audio_time
+            due = (self._started or self.clock()) + self.effective_delay_s + audio_time
             wait = due - self.clock()
             if wait > 0 and self.cancelled.wait(wait):
                 break
@@ -92,33 +100,40 @@ class StreamingLipSynchronizer:
             target = 0.0 if rms < peak * 0.07 else min(0.72, (rms / peak) ** 0.5 * 0.72)
             if target > 0:
                 self.diagnostics.last_speech_frame_audio_s = audio_time
+                self.diagnostics.last_speech_audio_end_s = audio_time + len(pcm) / (self.sample_rate * 2)
             now = self.clock()
             dt = max(0.001, now - (self._last or now))
             self._last = now
             allowed = speed_fraction * dt
             self._position += max(-allowed, min(allowed, target - self._position))
             self.mouth.set_openness_step(max(0.0, min(1.0, self._position)))
+            if target > 0:
+                self.diagnostics.last_speech_mouth_command_at = self.clock()
             self.diagnostics.last_scheduled_mouth_at = due
             self.diagnostics.last_mouth_frame_processed_at = self.clock()
             self.analysis_ms += (self.clock() - began) * 1000
         if self.cancelled.is_set() and self.diagnostics.shutdown_reason is None:
             self.diagnostics.shutdown_reason = "cancelled"
 
-    def finish(self, playback_completed_at: float | None = None, close: bool = True) -> None:
+    def finish(self, playback_completed_at: float | None = None, close: bool = True,
+               playback_started_at: float | None = None) -> None:
         """Drain all queued frames before closing, including delayed Bluetooth frames."""
         self.diagnostics.playback_completed_at = playback_completed_at or self.clock()
         if self.thread and self.thread.is_alive() and not self.cancelled.is_set():
             self.queue.put(self._eos)
             self.thread.join()
+        if playback_started_at is not None and self.diagnostics.last_speech_audio_end_s is not None:
+            self.diagnostics.final_audible_audio_estimate_at = (
+                playback_started_at + self.latency_s + self.diagnostics.last_speech_audio_end_s)
         if close and not self.cancelled.is_set():
             self.mouth.set_openness_step(0.0)
         self._logger.debug(
             "mouth EOS final_tts_pcm=%s last_speech_audio=%s last_scheduled=%s playback_complete=%s "
-            "last_processed=%s dropped=%s shutdown=%s",
+            "last_processed=%s dropped=%s shutdown=%s audio_delay=%.3f mouth_offset=%.3f",
             self.diagnostics.final_tts_pcm_received_at, self.diagnostics.last_speech_frame_audio_s,
             self.diagnostics.last_scheduled_mouth_at, self.diagnostics.playback_completed_at,
             self.diagnostics.last_mouth_frame_processed_at, self.diagnostics.dropped_frames,
-            self.diagnostics.shutdown_reason)
+            self.diagnostics.shutdown_reason, self.latency_s, self.mouth_offset_s)
 
     def stop(self, close: bool = True) -> None:
         """Cancel immediately (interrupt/error path); no queued command is retained."""
