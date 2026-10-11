@@ -3,7 +3,7 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from src.servo_controller import (ConfigurationError, LimitError, MockBackend,
     NotCalibratedError, PositionUnknownError, ServoConfig, ServoController,
@@ -1011,6 +1011,43 @@ class ServoControllerTests(unittest.TestCase):
             self.assertEqual(robot_chat.main(["--listen", "--streaming", "--skip-model-check"]), 0)
         controller.assert_not_called()
         self.assertIsNone(listening.call_args.kwargs["mouth"])
+
+    def test_head_roll_startup_with_incomplete_p0_limits_keeps_ziggy_running(self):
+        configs = {"head_roll": ServoConfig("P0", 70, 1, None, None)}
+        with patch.object(robot_chat.GeminiConfig, "from_environment", return_value=object()), \
+             patch.object(robot_chat, "GeminiService", return_value=object()), \
+             patch.object(robot_chat, "load_config", return_value=configs), \
+             patch.object(robot_chat, "ServoController", return_value=MagicMock()), \
+             patch.object(robot_chat, "adopt_head_roll_reference") as reference, \
+             patch.object(robot_chat, "run_listen_session", return_value=0) as listening:
+            self.assertEqual(robot_chat.main(["--listen", "--streaming", "--head-roll", "--skip-model-check"]), 0)
+        reference.assert_not_called()
+        self.assertIsNone(listening.call_args.kwargs["head_roll"])
+
+    def test_head_roll_startup_without_p0_config_keeps_ziggy_running(self):
+        with patch.object(robot_chat.GeminiConfig, "from_environment", return_value=object()), \
+             patch.object(robot_chat, "GeminiService", return_value=object()), \
+             patch.object(robot_chat, "load_config", return_value={}), \
+             patch.object(robot_chat, "ServoController", return_value=MagicMock()), \
+             patch.object(robot_chat, "adopt_head_roll_reference") as reference, \
+             patch.object(robot_chat, "run_listen_session", return_value=0) as listening:
+            self.assertEqual(robot_chat.main(["--listen", "--streaming", "--head-roll", "--skip-model-check"]), 0)
+        reference.assert_not_called()
+        self.assertIsNone(listening.call_args.kwargs["head_roll"])
+
+    def test_head_roll_startup_uses_existing_verified_narrow_range(self):
+        configs = {"head_roll": ServoConfig("P0", 70, 1, 68, 72)}
+        animator = object()
+        with patch.object(robot_chat.GeminiConfig, "from_environment", return_value=object()), \
+             patch.object(robot_chat, "GeminiService", return_value=object()), \
+             patch.object(robot_chat, "load_config", return_value=configs), \
+             patch.object(robot_chat, "ServoController", return_value=MagicMock()) as controller, \
+             patch.object(robot_chat, "adopt_head_roll_reference", return_value=True) as reference, \
+             patch.object(robot_chat, "HeadRollAnimator", return_value=animator), \
+             patch.object(robot_chat, "run_listen_session", return_value=0) as listening:
+            self.assertEqual(robot_chat.main(["--listen", "--streaming", "--head-roll", "--skip-model-check"]), 0)
+        reference.assert_called_once_with(configs, controller.return_value)
+        self.assertIs(listening.call_args.kwargs["head_roll"], animator)
 
     def test_supervised_jaw_reference_adoption_sends_no_servo_command(self):
         configs = {
