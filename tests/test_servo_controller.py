@@ -1045,6 +1045,13 @@ class ServoControllerTests(unittest.TestCase):
         self.assertEqual(controller.position("head_roll"), 80)
         self.assertTrue(all(port == "P0" and 60 <= angle <= 80 for port, angle in backend.commands))
 
+    def test_head_roll_cycle_passes_through_center_and_never_uses_unverified_targets(self):
+        configs = {"head_roll": ServoConfig("P0", 70, 1, 68, 72)}
+        backend = QuietMock(); controller = ServoController(configs, backend, sleep=lambda _: None)
+        controller.adopt_confirmed_position("head_roll", 70)
+        animator = HeadRollAnimator(controller, clock=lambda: 0.0, sleep=lambda _: None)
+        self.assertEqual(animator._cycle_targets(), (70, 72, 70, 68, 70))
+
     def test_head_roll_extension_saves_each_new_safe_endpoint_only(self):
         configs = {"head_roll": ServoConfig("P0", 70, 1, 68, 72)}
         backend = QuietMock(); controller = ServoController(configs, backend, sleep=lambda _: None)

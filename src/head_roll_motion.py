@@ -9,7 +9,7 @@ from .servo_controller import ConfigurationError, ServoController, validate_conf
 
 
 class HeadRollAnimator:
-    """Alternate only between saved P0 limits using cosine ease-in/ease-out."""
+    """Move P0 through center and saved limits using cosine ease-in/ease-out."""
     def __init__(self, controller: ServoController, *, transition_s: float = 2.0,
                  update_s: float = .1, speed_dps: float = 6.0,
                  clock=time.monotonic, sleep=time.sleep) -> None:
@@ -19,13 +19,18 @@ class HeadRollAnimator:
         self.update_s, self.speed_dps, self.clock, self.sleep = update_s, speed_dps, clock, sleep
         self.cancelled = threading.Event(); self.thread: threading.Thread | None = None
 
-    def _limits(self) -> tuple[float, float]:
+    def _limits(self) -> tuple[float, float, float]:
         cfg = self.controller.configs.get("head_roll")
         if cfg is None:
             raise ConfigurationError("head_roll is not configured")
         validate_config("head_roll", cfg, require_calibrated=True)
         assert cfg.min_angle is not None and cfg.max_angle is not None
-        return cfg.min_angle, cfg.max_angle
+        return cfg.min_angle, cfg.neutral, cfg.max_angle
+
+    def _cycle_targets(self) -> tuple[float, float, float, float, float]:
+        """The center -> high -> center -> low -> center cycle within saved limits."""
+        low, center, high = self._limits()
+        return center, high, center, low, center
 
     def _transition(self, target: float) -> None:
         start = self.controller.position("head_roll")
@@ -43,11 +48,16 @@ class HeadRollAnimator:
             if remaining > 0: self.sleep(remaining)
 
     def run(self) -> None:
-        low, high = self._limits()
-        target = high if self.controller.position("head_roll") != high else low
+        center, high, _, low, _ = self._cycle_targets()
+        # A fresh reference can be any verified P0 position. Reach its saved
+        # center smoothly before beginning the repeatable roll cycle.
+        if self.controller.position("head_roll") != center:
+            self._transition(center)
         while not self.cancelled.is_set():
-            self._transition(target)
-            target = low if target == high else high
+            for target in (high, center, low, center):
+                if self.cancelled.is_set():
+                    return
+                self._transition(target)
 
     def start(self) -> None:
         self._limits()

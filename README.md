@@ -58,7 +58,7 @@ For the visible 60°–80° P0 range, use the all-or-nothing supervised setup. I
 python3 -m src.head_roll_calibration wide
 ```
 
-Then start Ziggy with optional gentle two-second P0 side-to-side motion. It asks once for a fresh P0 powered reference for this process and never restores that reference after restart:
+Then start Ziggy with optional gentle P0 motion. Each two-second eased leg follows saved center -> verified high -> center -> verified low -> center; it never substitutes the desired 60/80 targets for narrower saved limits. It asks once for a fresh P0 powered reference for this process and never restores that reference after restart:
 
 ```bash
 python3 -m src.robot_chat --listen --streaming --head-roll
