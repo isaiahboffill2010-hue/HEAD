@@ -44,6 +44,14 @@ It saves 68°–72° only after every displayed movement has been accepted as sa
 python3 -m src.head_roll_calibration test
 ```
 
+To extend one existing P0 endpoint beyond the saved range, begin with P0 already at that verified endpoint and run:
+
+```bash
+python3 -m src.head_roll_calibration extend
+```
+
+It permits only `TEST` of the next adjacent one-degree angle and saves each endpoint only after `SAFE`; `STOP` preserves all previously verified limits.
+
 Then start Ziggy with optional gentle two-second P0 side-to-side motion. It asks once for a fresh P0 powered reference for this process and never restores that reference after restart:
 
 ```bash

@@ -70,6 +70,49 @@ def quick(configs, controller, path: Path, input_func=input) -> int:
     return 0
 
 
+def extend(configs, controller, path: Path, input_func=input) -> int:
+    """Extend exactly one already-verified P0 endpoint, one confirmed degree at a time."""
+    cfg = configs[NAME]
+    validate_config(NAME, cfg, require_calibrated=True)
+    assert cfg.min_angle is not None and cfg.max_angle is not None
+    print(f"P0 extension starts only from a saved endpoint: {cfg.min_angle:g}..{cfg.max_angle:g} deg.")
+    print("No mechanical limit beyond the currently saved verified range is assumed.")
+    if not adopt_head_roll_reference(configs, controller, input_func): return 1
+    current = controller.position(NAME)
+    assert current is not None
+    if current == cfg.max_angle:
+        direction, target = 1, current + 1
+    elif current == cfg.min_angle:
+        direction, target = -1, current - 1
+    else:
+        print("P0 must be at one saved endpoint before extension; no movement was sent.")
+        return 1
+    while True:
+        if not -90 <= target <= 90:
+            print("Stopped at the Robot HAT electrical -90..90 degree limit; no movement was sent.")
+            return 0
+        print(SAFETY)
+        print("Inspect the bracket and full linkage clearance before every new degree.")
+        command = input_func(f"Type TEST {target:g} to test this next unverified P0 angle, or STOP: ").strip()
+        if command == "STOP":
+            print("Extension stopped. Previously saved verified limits are unchanged.")
+            return 0
+        if command != f"TEST {target:g}":
+            print("No movement was sent. Type the displayed TEST command or STOP.")
+            continue
+        controller.calibration_step(NAME, direction, speed_dps=5)
+        if input_func("Type SAFE only if this exact movement was safe, or STOP: ").strip() != "SAFE":
+            print("This new angle was NOT saved. Stop and inspect; no further command was sent.")
+            return 1
+        if direction > 0:
+            cfg.max_angle = target
+        else:
+            cfg.min_angle = target
+        save_config(path, configs)
+        print(f"Saved verified P0 {'maximum' if direction > 0 else 'minimum'} {target:g} deg.")
+        target += direction
+
+
 def roll_test(configs, controller, input_func=input) -> int:
     cfg = configs[NAME]; validate_config(NAME, cfg, require_calibrated=True)
     print(f"P0 roll-only test: saved verified range {cfg.min_angle:g}..{cfg.max_angle:g} deg.")
@@ -94,11 +137,13 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Safe P0 head-roll calibration")
     parser.add_argument("--mock", action="store_true")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("command", choices=("quick", "test"))
+    parser.add_argument("command", choices=("quick", "extend", "test"))
     args = parser.parse_args(argv)
     try:
         configs = load_config(args.config); controller = ServoController(configs, MockBackend() if args.mock else RobotHatBackend())
-        return quick(configs, controller, args.config) if args.command == "quick" else roll_test(configs, controller)
+        if args.command == "quick": return quick(configs, controller, args.config)
+        if args.command == "extend": return extend(configs, controller, args.config)
+        return roll_test(configs, controller)
     except KeyboardInterrupt:
         print("Stopped: no P0 return-to-center command was sent. Disconnect servo power physically if unsafe."); return 130
     except (ConfigurationError, ServoError, ValueError) as exc:
