@@ -1036,14 +1036,14 @@ class ServoControllerTests(unittest.TestCase):
         self.assertEqual((saved.min_angle, saved.neutral, saved.max_angle), (68, 70, 72))
         self.assertTrue(all(port == "P0" for port, _ in backend.commands))
 
-    def test_head_roll_animation_stays_within_p0_verified_limits(self):
-        configs = {"head_roll": ServoConfig("P0", 70, 1, 68, 72)}
+    def test_head_roll_animation_uses_saved_60_to_80_verified_limits(self):
+        configs = {"head_roll": ServoConfig("P0", 70, 1, 60, 80)}
         backend = QuietMock(); controller = ServoController(configs, backend, sleep=lambda _: None)
         controller.adopt_confirmed_position("head_roll", 70)
         animator = HeadRollAnimator(controller, clock=lambda: 0.0, sleep=lambda _: None, update_s=.5)
-        animator._transition(72)
-        self.assertEqual(controller.position("head_roll"), 72)
-        self.assertTrue(all(port == "P0" and 68 <= angle <= 72 for port, angle in backend.commands))
+        animator._transition(80)
+        self.assertEqual(controller.position("head_roll"), 80)
+        self.assertTrue(all(port == "P0" and 60 <= angle <= 80 for port, angle in backend.commands))
 
     def test_head_roll_extension_saves_each_new_safe_endpoint_only(self):
         configs = {"head_roll": ServoConfig("P0", 70, 1, 68, 72)}
@@ -1065,19 +1065,18 @@ class ServoControllerTests(unittest.TestCase):
                                               input_func=lambda _: next(replies)), 1)
         self.assertEqual(backend.commands, [])
 
-    def test_wide_head_roll_setup_saves_65_to_75_only_after_both_sides_safe(self):
+    def test_wide_head_roll_setup_saves_60_to_80_only_after_both_sides_safe(self):
         configs = {"head_roll": ServoConfig("P0", 70, 1, None, None)}
         backend = QuietMock(); controller = ServoController(configs, backend, sleep=lambda _: None)
-        replies = iter(["70", "POWERED", "TEST 71", "SAFE", "TEST 72", "SAFE", "TEST 73", "SAFE",
-                        "TEST 74", "SAFE", "TEST 75", "SAFE", "TEST 74", "SAFE", "TEST 73", "SAFE",
-                        "TEST 72", "SAFE", "TEST 71", "SAFE", "TEST 70", "SAFE", "TEST 69", "SAFE",
-                        "TEST 68", "SAFE", "TEST 67", "SAFE", "TEST 66", "SAFE", "TEST 65", "SAFE"])
+        route = list(range(71, 81)) + list(range(79, 69, -1)) + list(range(69, 59, -1))
+        replies = iter(["70", "POWERED"] + [item for angle in route
+                                              for item in (f"TEST {angle}", "SAFE")])
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "servos.json"
             self.assertEqual(wide_head_roll(configs, controller, path, input_func=lambda _: next(replies)), 0)
             saved = load_config(path)["head_roll"]
-        self.assertEqual((saved.min_angle, saved.neutral, saved.max_angle), (65, 70, 75))
-        self.assertTrue(all(port == "P0" and 65 <= angle <= 75 for port, angle in backend.commands))
+        self.assertEqual((saved.min_angle, saved.neutral, saved.max_angle), (60, 70, 80))
+        self.assertTrue(all(port == "P0" and 60 <= angle <= 80 for port, angle in backend.commands))
 
     def test_wide_head_roll_interruption_preserves_saved_range(self):
         configs = {"head_roll": ServoConfig("P0", 70, 1, None, None)}

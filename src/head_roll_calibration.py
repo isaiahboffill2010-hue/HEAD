@@ -165,11 +165,11 @@ def _legacy_wide(configs, controller, path: Path, input_func=input) -> int:
 
 
 def wide(configs, controller, path: Path, input_func=input) -> int:
-    """Establish a 65..75 degree automatic range from neutral-only P0 data."""
+    """Establish a 60..80 degree automatic range from neutral-only P0 data."""
     cfg = configs[NAME]
     if cfg.neutral is None:
         raise ConfigurationError("P0 wide setup needs a saved head_roll neutral; run mechanical calibration first")
-    center, target_low, target_high = float(cfg.neutral), 65.0, 75.0
+    center, target_low, target_high = float(cfg.neutral), 60.0, 80.0
     print(f"P0 wide setup: saved neutral {center:g} deg; target {target_low:g}..{target_high:g} deg.")
     if not cfg.calibrated:
         print("P0 travel limits are incomplete. Automatic head roll remains disabled until this supervised setup finishes.")
@@ -188,7 +188,7 @@ def wide(configs, controller, path: Path, input_func=input) -> int:
             return 1
     cfg.min_angle, cfg.max_angle = target_low, target_high
     save_config(path, configs)
-    print("Saved verified P0 range 65..75 deg. Future supervised P0 animation uses these limits.")
+    print("Saved verified P0 range 60..80 deg. Future supervised P0 animation uses these limits.")
     return 0
 
 

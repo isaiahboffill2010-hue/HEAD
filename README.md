@@ -52,7 +52,7 @@ python3 -m src.head_roll_calibration extend
 
 It permits only `TEST` of the next adjacent one-degree angle and saves each endpoint only after `SAFE`; `STOP` preserves all previously verified limits.
 
-For the visible 65°–75° P0 range, use the all-or-nothing supervised setup. It begins from a freshly confirmed saved 70° neutral even if P0 travel limits are incomplete, tests every move in one-degree `TEST`/`SAFE` steps, and saves 65°–75° only once both endpoints are accepted:
+For the visible 60°–80° P0 range, use the all-or-nothing supervised setup. It begins from a freshly confirmed saved 70° neutral even if P0 travel limits are incomplete, tests every move in one-degree `TEST`/`SAFE` steps, and saves 60°–80° only once both endpoints are accepted:
 
 ```bash
 python3 -m src.head_roll_calibration wide
