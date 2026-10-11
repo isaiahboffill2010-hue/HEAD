@@ -1,6 +1,8 @@
 """Reliable and streaming Gemini + Despina terminal conversation."""
 from __future__ import annotations
-import argparse, csv, os, re, tempfile, time, wave
+import argparse, csv, os, tempfile, time, wave
+from collections import deque
+from enum import Enum
 from pathlib import Path
 
 from .adaptive_lipsync import AdaptiveLipSynchronizer, calibrated_max_jaw_travel, load_motion_settings
@@ -13,10 +15,14 @@ from .mouth_calibration import _known_reference
 from .servo_controller import ConfigurationError, RobotHatBackend, ServoController, load_config
 from .streaming_lipsync import StreamingLipSynchronizer
 from .microphone import Microphone
+from .wake_word import PorcupineWakeWord, WakeWordConfigurationError
 
 
-WAKE_WORD = "ziggy"
-WAKE_WORD_PATTERN = re.compile(r"\bziggy\b", re.IGNORECASE)
+class ConversationState(str, Enum):
+    WAITING_FOR_WAKE_WORD = "WAITING_FOR_WAKE_WORD"
+    RECORDING_QUESTION = "RECORDING_QUESTION"
+    TRANSCRIBING = "TRANSCRIBING"
+    RESPONDING = "RESPONDING"
 
 
 def ziggy_silence_seconds() -> float:
@@ -256,41 +262,49 @@ def run_session(service, *, voice_only, mode="reliable", mouth=None, configs=Non
         except RuntimeError as exc: print(f"Audio error: {exc}")
 
 
-def wake_command(transcript: str) -> str | None:
-    """Return the spoken request after Ziggy's wake word, without an ML wake model."""
-    found = WAKE_WORD_PATTERN.search(transcript)
-    if not found:
-        return None
-    return transcript[found.end():].lstrip(" ,.!?:;-\t").strip()
-
-
-def run_listen_session(service, *, mode, mouth=None, configs=None, debug_audio=False) -> int:
+def run_listen_session(service, *, mode, mouth=None, configs=None, debug_audio=False,
+                       microphone_factory=Microphone, wake_factory=PorcupineWakeWord) -> int:
     """Hands-free turns. Capture remains open; it is idle while HEAD speaks."""
-    microphone = Microphone()
+    microphone = microphone_factory()
     microphone.silence_s = ziggy_silence_seconds()
+    wake = wake_factory.from_environment()
+    if wake.sample_rate != microphone.rate:
+        wake.close()
+        raise WakeWordConfigurationError(
+            f"Ziggy wake model requires {wake.sample_rate} Hz but microphone capture is {microphone.rate} Hz")
+    pre_roll = deque(maxlen=max(1, round(.3 * wake.sample_rate / wake.frame_length)))
+    state = ConversationState.WAITING_FOR_WAKE_WORD
     print(f"Ziggy: Listening for wake word (mic: {microphone.device})")
     print("Mouth: Ready" if mouth is not None else "Mouth: Disabled — reference required")
     try:
         while True:
-            print("Listening for wake word...")
-            utterance = microphone.listen()
-            if utterance is None:
-                print("No speech detected; listening again."); continue
+            if state is ConversationState.WAITING_FOR_WAKE_WORD:
+                print("Listening for wake word...")
+                while True:
+                    pcm = microphone.read_pcm(wake.frame_length * 2)
+                    pre_roll.append(pcm)
+                    if wake.detected(pcm):
+                        print("Ziggy: Wake word detected.")
+                        state = ConversationState.RECORDING_QUESTION
+                        break
+            # Include the detector's 300 ms rolling audio history. This keeps
+            # a question that immediately follows “Ziggy” intact.
+            utterance = microphone.record_after_wake(b"".join(pre_roll))
+            pre_roll.clear()
             print(f"Recording completed ({utterance.duration_s:.2f} s). Transcribing...")
+            state = ConversationState.TRANSCRIBING
             trace = LatencyTrace(); trace.mark("stt_request")
             with tempfile.TemporaryDirectory(prefix="head-mic-") as directory:
                 wav = microphone.write_wav(utterance, Path(directory) / "utterance.wav")
                 text = service.transcribe_wav(wav)
             trace.mark("stt_complete"); trace.span("STT transcription", "stt_request", "stt_complete")
             if not text:
-                print("No usable speech recognized; listening again."); continue
+                print("No usable speech recognized; listening again.")
+                state = ConversationState.WAITING_FOR_WAKE_WORD
+                continue
             print(f"You said: {text}")
-            request = wake_command(text)
-            if request is None:
-                print("Ziggy: Wake word not heard; listening again."); continue
-            if not request:
-                print("Ziggy: I heard you. Please say your request after Ziggy."); continue
-            answer = generate_complete_text(request, service, trace)
+            state = ConversationState.RESPONDING
+            answer = generate_complete_text(text, service, trace)
             helper = speak_streaming if mode == "streaming" else speak_reliable
             helper(answer, service, mouth=mouth, configs=configs, trace=trace, debug_audio=debug_audio)
             trace.finish(float(__import__("os").getenv("HEAD_AUDIO_LATENCY_MS", "0")))
@@ -299,8 +313,10 @@ def run_listen_session(service, *, mode, mouth=None, configs=None, debug_audio=F
             if trace.values_ms:
                 slowest = max(trace.values_ms.items(), key=lambda item: item[1])
                 print(f"Slowest measured stage: {slowest[0]} ({slowest[1]:.0f} ms)\n")
+            state = ConversationState.WAITING_FOR_WAKE_WORD
     finally:
         microphone.close()
+        wake.close()
 
 
 def main(argv=None):
@@ -358,7 +374,7 @@ def main(argv=None):
                            configs=configs, debug_audio=args.debug_audio)
     except KeyboardInterrupt:
         print("\nSTOPPED: no future mouth commands will be sent. Physically disconnect servo power if unsafe."); return 130
-    except (GeminiError, ConfigurationError, RuntimeError) as exc:
+    except (GeminiError, ConfigurationError, WakeWordConfigurationError, RuntimeError) as exc:
         print(f"Setup error: {exc}"); return 2
 
 

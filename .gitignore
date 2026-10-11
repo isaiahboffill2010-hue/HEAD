@@ -3,3 +3,5 @@ __pycache__/
 .pytest_cache/
 .env.local
 *.wav
+# Device-specific proprietary/custom wake-word models are local credentials/assets.
+*.ppn

@@ -20,11 +20,12 @@ from src.audio_sync import (AudioPlayer, PlaybackDiagnostics, RawPCMPlayer, ener
 from src.gemini_service import GeminiConfig, GeminiError, GeminiService, parse_word_timings, write_wav
 from src.streaming_lipsync import MouthTuning, StreamingLipSynchronizer
 from src.mouth_diagnostics import analyze_wav, compare_recordings, final_speech_report, write_svg
-from src.robot_chat import (establish_mouth, generate_complete_text, speak_streaming, wake_command,
+from src.robot_chat import (establish_mouth, generate_complete_text, speak_streaming,
     ziggy_silence_seconds)
 import src.robot_chat as robot_chat
 from src.latency import LatencyTrace
-from src.microphone import Microphone
+from src.microphone import Microphone, Utterance
+from src.wake_word import PorcupineWakeWord
 
 
 class QuietMock(MockBackend):
@@ -897,14 +898,62 @@ class ServoControllerTests(unittest.TestCase):
         self.assertIsNotNone(utterance)
         self.assertGreater(utterance.duration_s, .5)
 
-    def test_ziggy_wake_word_extracts_request(self):
-        self.assertEqual(wake_command("Hey Ziggy, tell me a joke."), "tell me a joke.")
-        self.assertEqual(wake_command("ZIGGY!"), "")
-        self.assertIsNone(wake_command("please tell me a joke"))
+    def test_offline_wake_detector_uses_local_pcm_model_result(self):
+        class Engine:
+            frame_length = 2; sample_rate = 16000
+            def __init__(self): self.samples = None
+            def process(self, samples): self.samples = samples; return 0
+            def delete(self): pass
+        engine = Engine(); detector = PorcupineWakeWord(engine)
+        self.assertTrue(detector.detected(b"\x01\x00\xff\xff"))
+        self.assertEqual(engine.samples, (1, -1))
+
+    def test_background_audio_is_not_transcribed_until_local_wake_detects(self):
+        class MicrophoneDouble:
+            device = "plughw:2,0"; rate = 16000; silence_s = 1.0
+            def __init__(self): self.blocks = iter([b"background", b"ziggy", KeyboardInterrupt()]); self.prefixes = []
+            def read_pcm(self, size):
+                item = next(self.blocks)
+                if isinstance(item, BaseException): raise item
+                return item
+            def record_after_wake(self, prefix):
+                self.prefixes.append(prefix); return Utterance(b"question", .5)
+            def write_wav(self, utterance, path): path.write_bytes(utterance.pcm); return path
+            def close(self): pass
+        class Wake:
+            frame_length = 2; sample_rate = 16000
+            def detected(self, pcm): return pcm == b"ziggy"
+            def close(self): pass
+        class WakeFactory:
+            @classmethod
+            def from_environment(cls): return Wake()
+        mic = MicrophoneDouble(); service = type("Service", (), {"calls": 0})()
+        def transcribe(path): service.calls += 1; return "Ziggy, what is your name?"
+        service.transcribe_wav = transcribe
+        with patch.object(robot_chat, "generate_complete_text", return_value="I am Ziggy."), \
+             patch.object(robot_chat, "speak_streaming") as speak:
+            with self.assertRaises(KeyboardInterrupt):
+                robot_chat.run_listen_session(service, mode="streaming", microphone_factory=lambda: mic,
+                                               wake_factory=WakeFactory)
+        self.assertEqual(service.calls, 1)
+        self.assertEqual(mic.prefixes, [b"backgroundziggy"])
+        speak.assert_called_once()
 
     def test_ziggy_uses_one_second_silence_even_with_legacy_mic_setting(self):
         with patch.dict("os.environ", {"HEAD_MIC_SILENCE_MS": "550"}, clear=False):
             self.assertEqual(ziggy_silence_seconds(), 1.0)
+
+    def test_post_wake_recording_keeps_short_pause_and_ends_after_one_second(self):
+        quiet = b"\x00\x00" * 320; speech = b"\xff\x7f" * 320
+        frames = [speech] * 3 + [quiet] * 20 + [speech] * 3 + [quiet] * 50
+        ticks = iter(index * .02 for index in range(200))
+        mic = Microphone(clock=lambda: next(ticks))
+        mic.start = lambda: None
+        mic._read_frame = lambda: frames.pop(0)
+        mic.threshold = 100; mic.silence_s = 1.0
+        utterance = mic.record_after_wake()
+        self.assertGreaterEqual(utterance.duration_s, 1.5)
+        self.assertEqual(len(frames), 0)
 
     def test_hands_free_startup_never_constructs_or_prompts_for_jaws(self):
         service = object()

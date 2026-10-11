@@ -70,10 +70,10 @@ class Microphone:
         state = str(code) if code is not None else "still running"
         return f"microphone capture ended unexpectedly (arecord exit code: {state}; ALSA stderr: {stderr})"
 
-    def _read_frame(self) -> bytes:
-        """Read precisely one 20 ms frame; pipe reads may legitimately be short."""
+    def _read_pcm(self, byte_count: int) -> bytes:
+        """Read exactly byte_count bytes; pipe reads may legitimately be short."""
         assert self.process and self.process.stdout
-        remaining = self.frame_bytes
+        remaining = byte_count
         chunks: list[bytes] = []
         while remaining:
             try:
@@ -85,6 +85,25 @@ class Microphone:
             chunks.append(chunk)
             remaining -= len(chunk)
         return b"".join(chunks)
+
+    def _read_frame(self) -> bytes:
+        """Read one 20 ms mono S16_LE analysis frame."""
+        return self._read_pcm(self.frame_bytes)
+
+    def read_pcm(self, byte_count: int) -> bytes:
+        """Read an exact raw PCM block, recovering a genuinely interrupted capture."""
+        if byte_count <= 0 or byte_count % 2:
+            raise ValueError("PCM reads require a positive whole number of S16_LE samples")
+        self.start()
+        for recovery in range(self.recovery_attempts + 1):
+            try:
+                return self._read_pcm(byte_count)
+            except _CaptureEnded as exc:
+                if recovery >= self.recovery_attempts:
+                    raise RuntimeError(f"{exc}; recovery attempts exhausted") from exc
+                print(f"Microphone capture interrupted; restarting ({recovery + 1}/{self.recovery_attempts}).")
+                self._restart_after_interruption()
+        raise AssertionError("unreachable")
 
     def _restart_after_interruption(self) -> None:
         self.close()
@@ -114,6 +133,37 @@ class Microphone:
                 if silence >= self.silence_s: break
         if not detected: return None
         pcm = b"".join(audio); return Utterance(pcm, len(pcm) / (self.rate * 2))
+
+    def record_after_wake(self, prefix_pcm: bytes = b"", max_s: float = 15.0) -> Utterance:
+        """Capture one complete post-wake request, retaining pre-roll safely.
+
+        The wake detector has already heard speech, so the silence timer begins
+        after activation and resets for every non-silent 20 ms frame.
+        """
+        if len(prefix_pcm) % 2:
+            raise ValueError("prefix PCM must be S16_LE samples")
+        self.start()
+        audio = [prefix_pcm] if prefix_pcm else []
+        silence = 0.0; began = self.clock(); recoveries = 0
+        while self.clock() - began < max_s:
+            try:
+                frame = self._read_frame()
+            except _CaptureEnded as exc:
+                if recoveries >= self.recovery_attempts:
+                    raise RuntimeError(f"{exc}; recovery attempts exhausted") from exc
+                recoveries += 1
+                print(f"Microphone capture interrupted; restarting ({recoveries}/{self.recovery_attempts}).")
+                self._restart_after_interruption()
+                continue
+            audio.append(frame)
+            if audioop.rms(frame, 2) < self.threshold:
+                silence += .02
+                if silence >= self.silence_s:
+                    break
+            else:
+                silence = 0.0
+        pcm = b"".join(audio)
+        return Utterance(pcm, len(pcm) / (self.rate * 2))
 
     def write_wav(self, utterance: Utterance, path: Path) -> Path:
         with wave.open(str(path), "wb") as out:
