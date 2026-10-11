@@ -880,7 +880,7 @@ class ServoControllerTests(unittest.TestCase):
     def test_microphone_vad_keeps_preroll_and_ends_after_silence(self):
         class Output:
             def __init__(self, frames): self.frames = iter(frames)
-            def read(self, size): return next(self.frames)
+            def read(self, size): return next(self.frames, b"")
         class Process:
             def __init__(self, frames): self.stdout = Output(frames)
             def poll(self): return 0
@@ -893,6 +893,106 @@ class ServoControllerTests(unittest.TestCase):
         utterance = mic.listen(max_s=3)
         self.assertIsNotNone(utterance)
         self.assertGreater(utterance.duration_s, .5)
+
+    def test_microphone_uses_one_continuous_raw_process_for_multiple_turns(self):
+        calls = []
+        quiet = b"\x00\x00" * 320; speech = b"\xff\x7f" * 320
+        # Each utterance has 550 ms of trailing quiet frames; both come from one pipe.
+        frames = [speech] * 2 + [quiet] * 28 + [speech] * 2 + [quiet] * 28
+        class Output:
+            def read(self, size): return frames.pop(0) if frames else b""
+            def close(self): pass
+        class Process:
+            stdout = Output()
+            def poll(self): return None
+            def terminate(self): pass
+            def wait(self, timeout=None): return 0
+        ticks = iter(index * .02 for index in range(300))
+        mic = Microphone(device="plughw:2,0", popen=lambda *args, **kwargs: calls.append(args[0]) or Process(),
+                         clock=lambda: next(ticks))
+        mic.threshold = 100; mic.silence_s = .5
+        self.assertIsNotNone(mic.listen())
+        self.assertIsNotNone(mic.listen())
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0], ["arecord", "-q", "-D", "plughw:2,0", "-f", "S16_LE", "-r", "16000",
+                                    "-c", "1", "-t", "raw"])
+
+    def test_microphone_assembles_partial_pcm_reads(self):
+        quiet = b"\x00\x00" * 320; speech = b"\xff\x7f" * 320
+        pieces = [speech[:103], speech[103:], *([quiet] * 28)]
+        class Output:
+            def read(self, size): return pieces.pop(0) if pieces else b""
+            def close(self): pass
+        class Process:
+            stdout = Output()
+            def poll(self): return None
+            def terminate(self): pass
+            def wait(self, timeout=None): return 0
+        ticks = iter(index * .02 for index in range(100))
+        mic = Microphone(popen=lambda *args, **kwargs: Process(), clock=lambda: next(ticks))
+        mic.threshold = 100; mic.silence_s = .5
+        utterance = mic.listen()
+        self.assertIsNotNone(utterance)
+        self.assertGreaterEqual(utterance.duration_s, .5)
+
+    def test_microphone_reports_exit_code_and_alsa_error_after_bounded_recovery(self):
+        class Output:
+            def read(self, size): return b""
+            def close(self): pass
+        class Error:
+            def __init__(self): self.read_once = False
+            def read(self, size):
+                if self.read_once: return b""
+                self.read_once = True
+                return b"arecord: audio open error: Device or resource busy\n"
+        class Process:
+            stdout = Output(); stderr = Error()
+            def poll(self): return 1
+            def terminate(self): pass
+            def wait(self, timeout=None): return 1
+        ticks = iter(index * .02 for index in range(100))
+        mic = Microphone(popen=lambda *args, **kwargs: Process(), clock=lambda: next(ticks))
+        mic.recovery_attempts = 0
+        with self.assertRaisesRegex(RuntimeError, r"exit code: 1.*audio open error"):
+            mic.listen()
+
+    def test_microphone_recovers_once_then_records_without_reinitializing_per_turn(self):
+        quiet = b"\x00\x00" * 320; speech = b"\xff\x7f" * 320
+        class Empty:
+            def read(self, size): return b""
+            def close(self): pass
+        class Frames:
+            def __init__(self): self.frames = [speech] * 2 + [quiet] * 28
+            def read(self, size): return self.frames.pop(0) if self.frames else b""
+            def close(self): pass
+        class Failed:
+            stdout = Empty()
+            def poll(self): return 1
+            def terminate(self): pass
+            def wait(self, timeout=None): return 1
+        class Working:
+            stdout = Frames()
+            def poll(self): return None
+            def terminate(self): pass
+            def wait(self, timeout=None): return 0
+        processes = iter([Failed(), Working()]); ticks = iter(index * .02 for index in range(100))
+        mic = Microphone(popen=lambda *args, **kwargs: next(processes), clock=lambda: next(ticks))
+        mic.threshold = 100; mic.silence_s = .5; mic.recovery_attempts = 1
+        self.assertIsNotNone(mic.listen())
+
+    def test_microphone_cleanup_terminates_persistent_process(self):
+        class Output:
+            def close(self): pass
+        class Process:
+            stdout = Output(); stderr = Output(); terminated = False
+            def poll(self): return None
+            def terminate(self): self.terminated = True
+            def wait(self, timeout=None): return 0
+        process = Process()
+        mic = Microphone(popen=lambda *args, **kwargs: process)
+        mic.start(); mic.close()
+        self.assertTrue(process.terminated)
+        self.assertIsNone(mic.process)
 
     def test_transcription_model_is_verified_and_short_audio_is_sent(self):
         class Models:
