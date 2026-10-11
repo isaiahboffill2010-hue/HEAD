@@ -27,6 +27,8 @@ from src.latency import LatencyTrace
 from src.microphone import Microphone, Utterance
 from src.vosk_wake import VoskWakeWord, VoskWakeWordError
 from src.vosk_setup import ensure_model
+from src.head_roll_calibration import quick as quick_head_roll
+from src.head_roll_motion import HeadRollAnimator
 
 
 class QuietMock(MockBackend):
@@ -1020,6 +1022,27 @@ class ServoControllerTests(unittest.TestCase):
         self.assertEqual(backend.commands, [])
         self.assertEqual(controller.position("upper_jaw"), 1)
         self.assertEqual(controller.position("lower_jaw"), 15)
+
+    def test_quick_head_roll_calibration_saves_only_verified_plus_minus_two_limits(self):
+        configs = {"head_roll": ServoConfig("P0", 70, 1, None, None)}
+        backend = QuietMock(); controller = ServoController(configs, backend, sleep=lambda _: None)
+        replies = iter(["70", "POWERED", "TEST 69", "SAFE", "TEST 68", "SAFE", "TEST 69", "SAFE",
+                        "TEST 70", "SAFE", "TEST 71", "SAFE", "TEST 72", "SAFE", "SAVE LIMITS"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "servos.json"
+            self.assertEqual(quick_head_roll(configs, controller, path, input_func=lambda _: next(replies)), 0)
+            saved = load_config(path)["head_roll"]
+        self.assertEqual((saved.min_angle, saved.neutral, saved.max_angle), (68, 70, 72))
+        self.assertTrue(all(port == "P0" for port, _ in backend.commands))
+
+    def test_head_roll_animation_stays_within_p0_verified_limits(self):
+        configs = {"head_roll": ServoConfig("P0", 70, 1, 68, 72)}
+        backend = QuietMock(); controller = ServoController(configs, backend, sleep=lambda _: None)
+        controller.adopt_confirmed_position("head_roll", 70)
+        animator = HeadRollAnimator(controller, clock=lambda: 0.0, sleep=lambda _: None, update_s=.5)
+        animator._transition(72)
+        self.assertEqual(controller.position("head_roll"), 72)
+        self.assertTrue(all(port == "P0" and 68 <= angle <= 72 for port, angle in backend.commands))
 
     def test_microphone_uses_one_continuous_raw_process_for_multiple_turns(self):
         calls = []

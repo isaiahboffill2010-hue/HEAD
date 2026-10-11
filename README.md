@@ -30,6 +30,26 @@ python3 -m src.robot_chat --listen --streaming --initialize-jaws
 
 That reference deliberately disappears after exit, reboot, power interruption, or physical repositioning. Use the normal command for voice-only operation until it is re-established. Saved endpoints and the selected 15°/s operating speed are loaded automatically, but are never treated as position feedback.
 
+## P0 head-roll (optional)
+
+P0 (`head_roll`) is separate from the jaws and never commands P2, P6, P8, or P10. With the power disconnect accessible, establish an initial narrow P0-only range through the supervised one-degree procedure:
+
+```bash
+python3 -m src.head_roll_calibration quick
+```
+
+It saves 68°–72° only after every displayed movement has been accepted as safe. Before normal use, run one supervised P0-only cycle:
+
+```bash
+python3 -m src.head_roll_calibration test
+```
+
+Then start Ziggy with optional gentle two-second P0 side-to-side motion. It asks once for a fresh P0 powered reference for this process and never restores that reference after restart:
+
+```bash
+python3 -m src.robot_chat --listen --streaming --head-roll
+```
+
 The capture process remains open between turns, uses 16 kHz mono S16_LE and lightweight energy VAD, retains 300 ms of pre-roll, stops after 550 ms silence (configurable 450–600 ms), and limits utterances to 15 seconds. It does not read microphone frames while HEAD is speaking. Gemini verifies the configured transcription model at startup and transcribes each short WAV with `gemini-3.5-transcribe` by default.
 
 The Ziggy default above (1,000 ms silence) supersedes the legacy 550 ms timing note.

@@ -16,6 +16,8 @@ from .servo_controller import ConfigurationError, RobotHatBackend, ServoControll
 from .streaming_lipsync import StreamingLipSynchronizer
 from .microphone import Microphone
 from .vosk_wake import VoskWakeWord, VoskWakeWordError
+from .head_roll_calibration import adopt_head_roll_reference
+from .head_roll_motion import HeadRollAnimator
 
 
 class ConversationState(str, Enum):
@@ -263,7 +265,7 @@ def run_session(service, *, voice_only, mode="reliable", mouth=None, configs=Non
 
 
 def run_listen_session(service, *, mode, mouth=None, configs=None, debug_audio=False,
-                       microphone_factory=Microphone, wake_factory=VoskWakeWord) -> int:
+                       microphone_factory=Microphone, wake_factory=VoskWakeWord, head_roll=None) -> int:
     """Hands-free turns. Capture remains open; it is idle while HEAD speaks."""
     microphone = microphone_factory()
     microphone.silence_s = ziggy_silence_seconds()
@@ -277,6 +279,8 @@ def run_listen_session(service, *, mode, mouth=None, configs=None, debug_audio=F
     print(f"Ziggy: Listening for wake word (mic: {microphone.device})")
     print("Mouth: Ready" if mouth is not None else "Mouth: Disabled — reference required")
     try:
+        if head_roll is not None:
+            head_roll.start(); print("Head roll: Ready (P0 only)")
         while True:
             if state is ConversationState.WAITING_FOR_WAKE_WORD:
                 print("Listening for wake word...")
@@ -315,6 +319,7 @@ def run_listen_session(service, *, mode, mouth=None, configs=None, debug_audio=F
                 print(f"Slowest measured stage: {slowest[0]} ({slowest[1]:.0f} ms)\n")
             state = ConversationState.WAITING_FOR_WAKE_WORD
     finally:
+        if head_roll is not None: head_roll.stop()
         microphone.close()
         wake.close()
 
@@ -332,6 +337,8 @@ def main(argv=None):
     parser.add_argument("--listen", action="store_true", help="persistent microphone VAD -> Gemini STT -> reply loop")
     parser.add_argument("--initialize-jaws", action="store_true",
                         help="supervised, session-only powered-reference confirmation for P8/P10")
+    parser.add_argument("--head-roll", action="store_true",
+                        help="enable supervised, bounded P0-only head roll during --listen")
     parser.add_argument("--list-mics", action="store_true", help="list ALSA capture devices and exit")
     parser.add_argument("--debug-audio", action="store_true")
     parser.add_argument("--skip-model-check", action="store_true")
@@ -347,15 +354,26 @@ def main(argv=None):
         if args.voice_test:
             speak_reliable("Hello. This is a Despina Bluetooth speaker test.", service, debug_audio=args.debug_audio); return 0
         if args.voice_only: return run_session(service, voice_only=True, mode=mode, debug_audio=args.debug_audio)
+        if args.head_roll and not args.listen:
+            raise ConfigurationError("--head-roll is available only with --listen")
         configs = load_config(Path(__file__).resolve().parents[1] / "config" / "servos.json")
-        mouth = None
-        if args.initialize_jaws:
+        mouth = head_roll = None; controller = None
+        if args.initialize_jaws or args.head_roll:
             controller = ServoController(configs, RobotHatBackend())
+        if args.initialize_jaws:
+            assert controller is not None
             print("Jaw initialization is session-only: it sends no command until speech begins.")
             if not establish_mouth(configs, controller): return 1
             mouth = MouthController(controller)
             print("Mouth: Ready for this continuously powered session.")
-        elif not args.listen:
+        if args.head_roll:
+            assert controller is not None
+            from .servo_controller import validate_config
+            validate_config("head_roll", configs["head_roll"], require_calibrated=True)
+            print("P0 head-roll needs a fresh trusted powered reference for this session.")
+            if not adopt_head_roll_reference(configs, controller): return 1
+            head_roll = HeadRollAnimator(controller)
+        elif not args.listen and not args.initialize_jaws:
             # Interactive and test modes retain their explicit supervised setup.
             controller = ServoController(configs, RobotHatBackend())
             if not establish_mouth(configs, controller): return 1
@@ -369,7 +387,8 @@ def main(argv=None):
                 "Hello, this is a short mouth synchronization test.", service,
                 mouth=mouth, configs=configs, debug_audio=args.debug_audio); return 0
         if args.listen:
-            return run_listen_session(service, mode=mode, mouth=mouth, configs=configs, debug_audio=args.debug_audio)
+            return run_listen_session(service, mode=mode, mouth=mouth, configs=configs,
+                                      debug_audio=args.debug_audio, head_roll=head_roll)
         return run_session(service, voice_only=False, mode=mode, mouth=mouth,
                            configs=configs, debug_audio=args.debug_audio)
     except KeyboardInterrupt:
