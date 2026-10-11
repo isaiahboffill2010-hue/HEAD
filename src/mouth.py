@@ -66,9 +66,12 @@ class MouthController:
         targets = {name: self.target_angle(name, amount) for name in JAW_NAMES}
         if any(self.controller.position(name) is None for name in JAW_NAMES):
             raise ConfigurationError("Both jaw starting positions must be explicitly established")
+        started = time.monotonic()
         for name in JAW_NAMES:
             self.controller.move_confirmed_position(name, targets[name])
-        record = {"timestamp": time.monotonic(), "openness": amount,
+        completed = time.monotonic()
+        record = {"timestamp": completed, "command_started_at": started, "command_completed_at": completed,
+                  "command_duration_ms": (completed - started) * 1000, "openness": amount,
                   "upper_jaw_angle": targets["upper_jaw"], "lower_jaw_angle": targets["lower_jaw"]}
         self.command_log.append(record)
         self._logger.debug("jaw command timestamp=%.6f openness=%.4f upper=%.3f lower=%.3f (commanded, not measured)",

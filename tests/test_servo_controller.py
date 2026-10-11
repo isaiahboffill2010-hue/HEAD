@@ -18,7 +18,7 @@ from src.audio_sync import (AudioPlayer, PlaybackDiagnostics, RawPCMPlayer, ener
     select_audio_backend, validate_word_timings, word_events)
 from src.gemini_service import GeminiConfig, GeminiError, GeminiService, parse_word_timings, write_wav
 from src.streaming_lipsync import MouthTuning, StreamingLipSynchronizer
-from src.mouth_diagnostics import analyze_wav, write_svg
+from src.mouth_diagnostics import analyze_wav, compare_recordings, write_svg
 from src.robot_chat import generate_complete_text, speak_streaming
 from src.latency import LatencyTrace
 
@@ -653,6 +653,35 @@ class ServoControllerTests(unittest.TestCase):
             self.assertEqual(records[0]["target"], 0.0)
             self.assertGreater(records[1]["target"], 0.0)
             self.assertIn("generated jaw openness", svg_path.read_text(encoding="utf-8"))
+
+    def test_slow_hardware_write_coalesces_stale_targets_instead_of_replaying_them(self):
+        import time
+        class SlowMouth:
+            def __init__(self): self.targets = []
+            def set_openness_step(self, value): self.targets.append(value); time.sleep(.06)
+        mouth = SlowMouth()
+        sync = StreamingLipSynchronizer(mouth, 20, MotionSettings(25, 60, 240, .02, 25),
+                                        tuning=MouthTuning(command_deadband_deg=.1))
+        sync.start()
+        for index in range(10):
+            sync.submit(b"\xff\x7f" * 480, index * .02)
+        sync.finish()
+        self.assertGreater(sync.diagnostics.stale_frames_coalesced, 0)
+        self.assertGreater(sync.diagnostics.late_hardware_commands, 0)
+        self.assertGreater(sync.diagnostics.max_command_duration_ms, 40)
+        self.assertLess(len(mouth.targets), 10)  # No historical command backlog.
+        self.assertEqual(mouth.targets[-1], 0.0)
+
+    def test_offline_recording_comparison_reports_command_timing_without_hardware(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); mouth_csv = root / "mouth.csv"; jaw_csv = root / "jaw.csv"
+            mouth_csv.write_text("command_lateness_ms,coalesced_frames\n25,3\n", encoding="utf-8")
+            jaw_csv.write_text("command_duration_ms\n4\n", encoding="utf-8")
+            summary = compare_recordings(mouth_csv, jaw_csv)
+            self.assertEqual(summary["analysis_frames"], 1)
+            self.assertEqual(summary["jaw_commands"], 1)
+            self.assertEqual(summary["max_scheduled_lateness_ms"], 25)
+            self.assertEqual(summary["coalesced_frames"], 3)
 
     def test_multisentence_tiny_text_chunks_are_fully_consumed(self):
         class Service:

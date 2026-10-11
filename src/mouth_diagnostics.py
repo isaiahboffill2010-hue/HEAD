@@ -4,7 +4,6 @@ from __future__ import annotations
 import argparse
 import audioop
 import csv
-import html
 import wave
 from pathlib import Path
 
@@ -50,10 +49,22 @@ def write_svg(records: list[dict[str, float | bool]], path: Path) -> None:
 <polyline fill="none" stroke="#888" points="{energy}"/><polyline fill="none" stroke="#06c" points="{openness}"/>{dots}</svg>''', encoding="utf-8")
 
 
+def compare_recordings(mouth_csv: Path, jaw_csv: Path) -> dict[str, float | int]:
+    """Summarize recorded scheduling and command-call timing; no position inference."""
+    with mouth_csv.open(newline="", encoding="utf-8") as source: motion = list(csv.DictReader(source))
+    with jaw_csv.open(newline="", encoding="utf-8") as source: jaws = list(csv.DictReader(source))
+    numbers = lambda rows, name: [float(row[name]) for row in rows if row.get(name) not in (None, "")]
+    return {"analysis_frames": len(motion), "jaw_commands": len(jaws),
+            "max_scheduled_lateness_ms": max(numbers(motion, "command_lateness_ms") or [0]),
+            "max_command_duration_ms": max(numbers(jaws, "command_duration_ms") or [0]),
+            "coalesced_frames": int(sum(numbers(motion, "coalesced_frames") or [0]))}
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Analyze recorded Despina WAV without servo hardware")
     parser.add_argument("wav", type=Path); parser.add_argument("--csv", type=Path)
-    parser.add_argument("--svg", type=Path); args = parser.parse_args(argv)
+    parser.add_argument("--svg", type=Path); parser.add_argument("--recorded-mouth-csv", type=Path)
+    parser.add_argument("--jaw-csv", type=Path); args = parser.parse_args(argv)
     records = analyze_wav(args.wav)
     csv_path = args.csv or args.wav.with_suffix(".offline-mouth.csv")
     with csv_path.open("w", newline="", encoding="utf-8") as out:
@@ -61,6 +72,11 @@ def main(argv=None) -> int:
         writer.writeheader(); writer.writerows(records)
     svg_path = args.svg or args.wav.with_suffix(".offline-mouth.svg"); write_svg(records, svg_path)
     print(f"Wrote {csv_path} and {svg_path}; no hardware was initialized.")
+    if args.recorded_mouth_csv or args.jaw_csv:
+        if not (args.recorded_mouth_csv and args.jaw_csv):
+            parser.error("--recorded-mouth-csv and --jaw-csv must be supplied together")
+        summary = compare_recordings(args.recorded_mouth_csv, args.jaw_csv)
+        print("Recorded command timing: " + ", ".join(f"{key}={value}" for key, value in summary.items()))
     return 0
 
 

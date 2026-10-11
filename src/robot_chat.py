@@ -59,6 +59,9 @@ def _print_diagnostics(text, segments, diagnostics, *, mode, audio_path=None, al
         print(f"  mouth worker shutdown reason: {detail.shutdown_reason or 'not finished'}")
         print(f"  speech/quiet analysis frames: {detail.speech_frames}/{detail.quiet_frames}")
         print(f"  commanded/suppressed stationary mouth frames: {detail.commanded_frames}/{detail.stationary_commands_suppressed}")
+        print(f"  coalesced stale frames: {detail.stale_frames_coalesced}")
+        print(f"  late hardware commands: {detail.late_hardware_commands}; max lateness: {detail.max_command_lateness_ms:.1f} ms")
+        print(f"  max jaw-command execution duration: {detail.max_command_duration_ms:.1f} ms")
     if alignment: print(f"  mouth alignment: {alignment}")
     if audio_path: print(f"  preserved audio: {audio_path}")
 
@@ -166,13 +169,16 @@ def speak_streaming(text, service: GeminiService, *, mouth=None, configs=None, t
             if lip:
                 timeline = saved.with_suffix(".mouth.csv")
                 with timeline.open("w", newline="", encoding="utf-8") as out:
-                    writer = csv.DictWriter(out, fieldnames=("audio_time", "rms", "threshold", "target", "openness", "commanded"))
+                    writer = csv.DictWriter(out, fieldnames=("audio_time", "rms", "threshold", "target", "openness", "commanded",
+                                                             "scheduled_at", "command_started_at", "command_completed_at",
+                                                             "command_lateness_ms", "command_duration_ms", "coalesced_frames"))
                     writer.writeheader(); writer.writerows(lip.motion_records)
                 print(f"  preserved mouth analysis: {timeline}")
             if mouth is not None and getattr(mouth, "command_log", None):
                 commands = saved.with_suffix(".jaw-commands.csv")
                 with commands.open("w", newline="", encoding="utf-8") as out:
-                    writer = csv.DictWriter(out, fieldnames=("timestamp", "openness", "upper_jaw_angle", "lower_jaw_angle"))
+                    writer = csv.DictWriter(out, fieldnames=("timestamp", "command_started_at", "command_completed_at",
+                                                             "command_duration_ms", "openness", "upper_jaw_angle", "lower_jaw_angle"))
                     writer.writeheader(); writer.writerows(mouth.command_log)
                 print(f"  preserved commanded jaw log (not position feedback): {commands}")
         _print_diagnostics(text, [text], player.diagnostics, mode="streaming", audio_path=saved,

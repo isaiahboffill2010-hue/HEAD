@@ -157,6 +157,16 @@ Run a response with `--debug-audio` to preserve its WAV, energy/openess timeline
 python3 -m src.mouth_diagnostics debug_audio/head-YYYYMMDD-HHMMSS.wav
 ```
 
+The streaming CSV also records each target's playback deadline, command start/completion timestamps, software-call duration, lateness, and count of expired frames coalesced into the newest target. Compare an existing capture without hardware access:
+
+```bash
+python3 -m src.mouth_diagnostics debug_audio/head-YYYYMMDD-HHMMSS.wav \
+  --recorded-mouth-csv debug_audio/head-YYYYMMDD-HHMMSS.mouth.csv \
+  --jaw-csv debug_audio/head-YYYYMMDD-HHMMSS.jaw-commands.csv
+```
+
+If hardware writes are slow, HEAD analyzes all expired PCM frames but emits only the newest valid rate-limited jaw target. It never replays a stale servo-command backlog after the related audio has passed.
+
 ## Reliable and streaming conversation modes
 
 Reliable mode is the temporary default. It fully consumes Gemini text, submits the complete response to Despina once, validates word timings against the generated WAV duration, precomputes speed-reachable syllable pulses, and starts WAV playback plus `AdaptiveLipSynchronizer` from one latency-adjusted clock. If alignment is unavailable or invalid, it uses 40 ms energy windows from the actual audio and labels that fallback as approximate.

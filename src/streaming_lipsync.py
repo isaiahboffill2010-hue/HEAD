@@ -30,6 +30,11 @@ class StreamingLipSyncDiagnostics:
     quiet_frames: int = 0
     commanded_frames: int = 0
     stationary_commands_suppressed: int = 0
+    stale_frames_coalesced: int = 0
+    late_hardware_commands: int = 0
+    max_command_lateness_ms: float = 0.0
+    max_command_duration_ms: float = 0.0
+    last_command_completed_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -118,8 +123,11 @@ class StreamingLipSynchronizer:
     def _run(self) -> None:
         peak = 1.0
         speed_fraction = self.settings.speed() / self.max_jaw_travel_deg
+        pending = None
+        end_of_stream = False
         while not self.cancelled.is_set():
-            item = self.queue.get()
+            item = pending if pending is not None else self.queue.get()
+            pending = None
             if item is self._eos:
                 self.diagnostics.shutdown_reason = "cancelled" if self.cancelled.is_set() else "drained end-of-stream"
                 break
@@ -128,42 +136,68 @@ class StreamingLipSynchronizer:
             wait = due - self.clock()
             if wait > 0 and self.cancelled.wait(wait):
                 break
-            began = self.clock()
-            rms = audioop.rms(pcm, 2) if pcm else 0
-            peak = max(float(rms), peak * 0.995)
-            threshold = peak * (0.07 / self.tuning.sensitivity)
-            raw_target = 0.0 if rms < threshold else min(
-                self.tuning.max_openness, (rms / peak) ** 0.5 * self.tuning.max_openness)
-            target = self._smoothed_target * self.tuning.smoothing + raw_target * (1 - self.tuning.smoothing)
-            self._smoothed_target = target
-            if target > 0:
-                self.diagnostics.speech_frames += 1
-                self.diagnostics.last_speech_frame_audio_s = audio_time
-                self.diagnostics.last_speech_audio_end_s = audio_time + len(pcm) / (self.sample_rate * 2)
-            else:
-                self.diagnostics.quiet_frames += 1
-            now = self.clock()
-            dt = max(0.001, now - (self._last or now))
-            self._last = now
-            allowed = speed_fraction * dt
-            self._position += max(-allowed, min(allowed, target - self._position))
+            # If a hardware write or the Pi scheduler made us late, analyze all
+            # expired PCM frames but retain only the newest target. Replaying old
+            # movement commands would make the jaw chase audio that already passed.
+            batch = [(pcm, audio_time, due)]
+            while True:
+                try:
+                    candidate = self.queue.get_nowait()
+                except queue.Empty:
+                    break
+                if candidate is self._eos:
+                    end_of_stream = True; break
+                candidate_due = (self._started or self.clock()) + self.effective_delay_s + candidate[1]
+                if candidate_due <= self.clock():
+                    batch.append((candidate[0], candidate[1], candidate_due))
+                else:
+                    pending = candidate; break
+            if len(batch) > 1:
+                self.diagnostics.stale_frames_coalesced += len(batch) - 1
+            latest = None
+            for frame, frame_time, frame_due in batch:
+                began = self.clock(); rms = audioop.rms(frame, 2) if frame else 0
+                peak = max(float(rms), peak * 0.995); threshold = peak * (0.07 / self.tuning.sensitivity)
+                raw_target = 0.0 if rms < threshold else min(
+                    self.tuning.max_openness, (rms / peak) ** 0.5 * self.tuning.max_openness)
+                target = self._smoothed_target * self.tuning.smoothing + raw_target * (1 - self.tuning.smoothing)
+                self._smoothed_target = target
+                if target > 0:
+                    self.diagnostics.speech_frames += 1
+                    self.diagnostics.last_speech_frame_audio_s = frame_time
+                    self.diagnostics.last_speech_audio_end_s = frame_time + len(frame) / (self.sample_rate * 2)
+                else: self.diagnostics.quiet_frames += 1
+                latest = (target, frame_time, frame_due, float(rms), threshold, began)
+            assert latest is not None
+            target, frame_time, frame_due, rms, threshold, began = latest
+            now = self.clock(); dt = max(0.001, now - (self._last or now)); self._last = now
+            allowed = speed_fraction * dt; self._position += max(-allowed, min(allowed, target - self._position))
             position = max(0.0, min(1.0, self._position))
-            command = abs(position - self._last_commanded_position) >= (
-                self.tuning.command_deadband_deg / self.max_jaw_travel_deg)
+            command = abs(position - self._last_commanded_position) >= (self.tuning.command_deadband_deg / self.max_jaw_travel_deg)
+            command_started = command_completed = None
             if command:
+                command_started = self.clock(); lateness_ms = max(0.0, (command_started - frame_due) * 1000)
                 self.mouth.set_openness_step(position)
-                self._last_commanded_position = position
-                self.diagnostics.commanded_frames += 1
-            else:
-                self.diagnostics.stationary_commands_suppressed += 1
-            self.motion_records.append({"audio_time": audio_time, "rms": float(rms), "threshold": threshold,
-                                        "target": target, "openness": position, "commanded": command})
-            if target > 0:
-                if command:
-                    self.diagnostics.last_speech_mouth_command_at = self.clock()
-            self.diagnostics.last_scheduled_mouth_at = due
+                command_completed = self.clock(); duration_ms = (command_completed - command_started) * 1000
+                self._last_commanded_position = position; self.diagnostics.commanded_frames += 1
+                self.diagnostics.max_command_lateness_ms = max(self.diagnostics.max_command_lateness_ms, lateness_ms)
+                self.diagnostics.max_command_duration_ms = max(self.diagnostics.max_command_duration_ms, duration_ms)
+                self.diagnostics.last_command_completed_at = command_completed
+                if lateness_ms > self.settings.update_interval_s * 1000: self.diagnostics.late_hardware_commands += 1
+                if target > 0: self.diagnostics.last_speech_mouth_command_at = command_completed
+            else: self.diagnostics.stationary_commands_suppressed += 1
+            self.motion_records.append({"audio_time": frame_time, "rms": rms, "threshold": threshold,
+                                        "target": target, "openness": position, "commanded": command,
+                                        "scheduled_at": frame_due, "command_started_at": command_started or 0.0,
+                                        "command_completed_at": command_completed or 0.0,
+                                        "command_lateness_ms": (command_started - frame_due) * 1000 if command_started else 0.0,
+                                        "command_duration_ms": (command_completed - command_started) * 1000 if command else 0.0,
+                                        "coalesced_frames": len(batch) - 1})
+            self.diagnostics.last_scheduled_mouth_at = frame_due
             self.diagnostics.last_mouth_frame_processed_at = self.clock()
             self.analysis_ms += (self.clock() - began) * 1000
+            if end_of_stream:
+                self.diagnostics.shutdown_reason = "drained end-of-stream"; break
         if self.cancelled.is_set() and self.diagnostics.shutdown_reason is None:
             self.diagnostics.shutdown_reason = "cancelled"
 
