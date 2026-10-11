@@ -52,6 +52,12 @@ python3 -m src.head_roll_calibration extend
 
 It permits only `TEST` of the next adjacent one-degree angle and saves each endpoint only after `SAFE`; `STOP` preserves all previously verified limits.
 
+For the visible 65°–75° P0 range, use the all-or-nothing supervised setup. It extends each side in one-degree `TEST`/`SAFE` steps, crossing only through the pre-existing verified range after explicit confirmation, and saves 65°–75° only once both sides are accepted:
+
+```bash
+python3 -m src.head_roll_calibration wide
+```
+
 Then start Ziggy with optional gentle two-second P0 side-to-side motion. It asks once for a fresh P0 powered reference for this process and never restores that reference after restart:
 
 ```bash

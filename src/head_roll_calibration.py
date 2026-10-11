@@ -113,6 +113,57 @@ def extend(configs, controller, path: Path, input_func=input) -> int:
         target += direction
 
 
+def _verify_target_side(controller, *, direction: int, target: float, input_func=input) -> bool:
+    """Test adjacent degrees toward one target without saving partial range changes."""
+    while controller.position(NAME) != target:
+        current = controller.position(NAME)
+        assert current is not None
+        next_angle = current + direction
+        print(SAFETY)
+        print("Inspect P0 clearance. Stop immediately for resistance, binding, strain, or an approaching bracket stop.")
+        if input_func(f"Type TEST {next_angle:g} to test this next one-degree P0 angle, or STOP: ").strip() != f"TEST {next_angle:g}":
+            print("Stopped; this target range was not saved."); return False
+        controller.calibration_step(NAME, direction, speed_dps=5)
+        if input_func("Type SAFE only if this exact movement was safe, or STOP: ").strip() != "SAFE":
+            print("Stopped after this movement. This unverified angle was not saved."); return False
+    return True
+
+
+def wide(configs, controller, path: Path, input_func=input) -> int:
+    """Supervised 65..75° target setup from the existing verified P0 range."""
+    cfg = configs[NAME]; validate_config(NAME, cfg, require_calibrated=True)
+    assert cfg.min_angle is not None and cfg.max_angle is not None
+    target_low, target_high = 65.0, 75.0
+    if cfg.min_angle < target_low or cfg.max_angle > target_high:
+        raise ConfigurationError("wide setup only grows an existing range inside 65..75 degrees; use extend for other limits")
+    print(f"P0 wide setup: current verified {cfg.min_angle:g}..{cfg.max_angle:g}; target {target_low:g}..{target_high:g} deg.")
+    if not adopt_head_roll_reference(configs, controller, input_func): return 1
+    current = controller.position(NAME)
+    assert current is not None
+    if current not in (cfg.min_angle, cfg.max_angle):
+        print("Begin at a saved verified endpoint; no movement was sent."); return 1
+    # Extend the side at the confirmed endpoint.  Crossing to the other saved
+    # endpoint is explicitly confirmed and stays entirely inside known travel.
+    if current == cfg.max_angle:
+        if not _verify_target_side(controller, direction=1, target=target_high, input_func=input_func): return 1
+        cfg.max_angle = target_high  # verified in memory; persist only after both sides pass
+        print(SAFETY)
+        if input_func(f"Type CROSS {cfg.min_angle:g} to move P0 only through the existing verified range, or STOP: ").strip() != f"CROSS {cfg.min_angle:g}": return 1
+        controller.move_to(NAME, cfg.min_angle, speed_dps=5, step=.25)
+        if not _verify_target_side(controller, direction=-1, target=target_low, input_func=input_func): return 1
+    else:
+        if not _verify_target_side(controller, direction=-1, target=target_low, input_func=input_func): return 1
+        cfg.min_angle = target_low  # verified in memory; persist only after both sides pass
+        print(SAFETY)
+        if input_func(f"Type CROSS {cfg.max_angle:g} to move P0 only through the existing verified range, or STOP: ").strip() != f"CROSS {cfg.max_angle:g}": return 1
+        controller.move_to(NAME, cfg.max_angle, speed_dps=5, step=.25)
+        if not _verify_target_side(controller, direction=1, target=target_high, input_func=input_func): return 1
+    cfg.min_angle, cfg.max_angle = target_low, target_high
+    save_config(path, configs)
+    print("Saved verified P0 range 65..75 deg. Future supervised P0 animation uses these limits.")
+    return 0
+
+
 def roll_test(configs, controller, input_func=input) -> int:
     cfg = configs[NAME]; validate_config(NAME, cfg, require_calibrated=True)
     print(f"P0 roll-only test: saved verified range {cfg.min_angle:g}..{cfg.max_angle:g} deg.")
@@ -137,12 +188,13 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Safe P0 head-roll calibration")
     parser.add_argument("--mock", action="store_true")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("command", choices=("quick", "extend", "test"))
+    parser.add_argument("command", choices=("quick", "extend", "wide", "test"))
     args = parser.parse_args(argv)
     try:
         configs = load_config(args.config); controller = ServoController(configs, MockBackend() if args.mock else RobotHatBackend())
         if args.command == "quick": return quick(configs, controller, args.config)
         if args.command == "extend": return extend(configs, controller, args.config)
+        if args.command == "wide": return wide(configs, controller, args.config)
         return roll_test(configs, controller)
     except KeyboardInterrupt:
         print("Stopped: no P0 return-to-center command was sent. Disconnect servo power physically if unsafe."); return 130
