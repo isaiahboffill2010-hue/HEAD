@@ -929,12 +929,14 @@ class ServoControllerTests(unittest.TestCase):
     def test_background_audio_is_not_transcribed_until_local_wake_detects(self):
         class MicrophoneDouble:
             device = "plughw:2,0"; rate = 16000; silence_s = 1.0
-            def __init__(self): self.blocks = iter([b"background", b"ziggy", KeyboardInterrupt()]); self.prefixes = []
+            def __init__(self): self.blocks = iter([b"background", b"ziggy"]); self.prefixes = []; self.recorded = 0
             def read_pcm(self, size):
                 item = next(self.blocks)
                 if isinstance(item, BaseException): raise item
                 return item
-            def record_after_wake(self, prefix):
+            def record_question_after_wake(self, prefix, wait_s=5.0):
+                self.recorded += 1
+                if self.recorded > 1: raise KeyboardInterrupt()
                 self.prefixes.append(prefix); return Utterance(b"question", .5)
             def write_wav(self, utterance, path): path.write_bytes(utterance.pcm); return path
             def close(self): pass
@@ -957,16 +959,42 @@ class ServoControllerTests(unittest.TestCase):
         self.assertEqual(mic.prefixes, [b"backgroundziggy"])
         speak.assert_called_once()
 
-    def test_wake_state_machine_handles_two_complete_turns_without_duplicates(self):
+    def test_wake_word_only_never_calls_gemini(self):
         class MicrophoneDouble:
             device = "plughw:2,0"; rate = 16000; silence_s = 1.0
-            def __init__(self): self.blocks = iter([b"ziggy", b"ziggy", KeyboardInterrupt()]); self.recorded = 0
+            def __init__(self): self.blocks = iter([b"ziggy", KeyboardInterrupt()]); self.waits = 0
             def read_pcm(self, size):
                 item = next(self.blocks)
                 if isinstance(item, BaseException): raise item
                 return item
-            def record_after_wake(self, prefix):
-                self.recorded += 1; return Utterance(b"question", .5)
+            def record_question_after_wake(self, prefix, wait_s=5.0): self.waits += 1; return None
+            def close(self): pass
+        class Wake:
+            frame_length = 2; sample_rate = 16000
+            def detected(self, pcm): return pcm == b"ziggy"
+            def close(self): pass
+        class WakeFactory:
+            @classmethod
+            def from_environment(cls): return Wake()
+        service = type("Service", (), {"calls": 0})()
+        service.transcribe_wav = lambda path: setattr(service, "calls", service.calls + 1) or "Ziggy"
+        with self.assertRaises(KeyboardInterrupt):
+            robot_chat.run_listen_session(service, mode="streaming", microphone_factory=MicrophoneDouble,
+                                           wake_factory=WakeFactory)
+        self.assertEqual(service.calls, 0)
+
+    def test_wake_state_machine_handles_two_complete_turns_without_duplicates(self):
+        class MicrophoneDouble:
+            device = "plughw:2,0"; rate = 16000; silence_s = 1.0
+            def __init__(self): self.blocks = iter([b"ziggy"]); self.recorded = 0
+            def read_pcm(self, size):
+                item = next(self.blocks)
+                if isinstance(item, BaseException): raise item
+                return item
+            def record_question_after_wake(self, prefix, wait_s=5.0):
+                self.recorded += 1
+                if self.recorded > 2: raise KeyboardInterrupt()
+                return Utterance(b"question", .5)
             def write_wav(self, utterance, path): path.write_bytes(utterance.pcm); return path
             def close(self): pass
         class Wake:
@@ -984,7 +1012,7 @@ class ServoControllerTests(unittest.TestCase):
             with self.assertRaises(KeyboardInterrupt):
                 robot_chat.run_listen_session(service, mode="streaming", microphone_factory=lambda: mic,
                                                wake_factory=WakeFactory)
-        self.assertEqual((mic.recorded, service.calls, speak.call_count), (2, 2, 2))
+        self.assertEqual((mic.recorded, service.calls, speak.call_count), (3, 2, 2))
 
     def test_ziggy_uses_one_second_silence_even_with_legacy_mic_setting(self):
         with patch.dict("os.environ", {"HEAD_MIC_SILENCE_MS": "550"}, clear=False):

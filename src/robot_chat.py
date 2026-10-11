@@ -1,6 +1,6 @@
 """Reliable and streaming Gemini + Despina terminal conversation."""
 from __future__ import annotations
-import argparse, csv, os, tempfile, time, wave
+import argparse, csv, os, re, tempfile, time, wave
 from collections import deque
 from enum import Enum
 from pathlib import Path
@@ -22,10 +22,16 @@ from .head_roll_motion import HeadRollAnimator
 
 
 class ConversationState(str, Enum):
-    WAITING_FOR_WAKE_WORD = "WAITING_FOR_WAKE_WORD"
-    RECORDING_QUESTION = "RECORDING_QUESTION"
-    TRANSCRIBING = "TRANSCRIBING"
+    SLEEPING = "SLEEPING"
+    AWAKE = "AWAKE"
     RESPONDING = "RESPONDING"
+
+
+def question_text(text: str) -> str:
+    """Remove a leading local wake word; reject wake-only cloud transcripts."""
+    cleaned = text.strip()
+    cleaned = re.sub(r"^\s*zigg(?:y|ie)\b[\s,!.?:-]*", "", cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
 
 
 def ziggy_silence_seconds() -> float:
@@ -288,36 +294,43 @@ def run_listen_session(service, *, mode, mouth=None, configs=None, debug_audio=F
         raise VoskWakeWordError(
             f"Ziggy wake model requires {wake.sample_rate} Hz but microphone capture is {microphone.rate} Hz")
     pre_roll = deque(maxlen=max(1, round(.3 * wake.sample_rate / wake.frame_length)))
-    state = ConversationState.WAITING_FOR_WAKE_WORD
+    state = ConversationState.SLEEPING
     print(f"Ziggy: Listening for wake word (mic: {microphone.device})")
     print("Mouth: Ready" if mouth is not None else "Mouth: Disabled — reference required")
     try:
         if head_roll is not None:
             head_roll.start(); print("Head roll: Ready (P0 only)")
         while True:
-            if state is ConversationState.WAITING_FOR_WAKE_WORD:
+            prefix = b""
+            if state is ConversationState.SLEEPING:
                 print("Listening for wake word...")
                 while True:
                     pcm = microphone.read_pcm(wake.frame_length * 2)
                     pre_roll.append(pcm)
                     if wake.detected(pcm):
                         print("Wake word detected: Ziggy")
-                        state = ConversationState.RECORDING_QUESTION
+                        state = ConversationState.AWAKE
+                        prefix = b"".join(pre_roll)
                         break
             # Include the detector's 300 ms rolling audio history. This keeps
             # a question that immediately follows “Ziggy” intact.
-            utterance = microphone.record_after_wake(b"".join(pre_roll))
+            print("Waiting for question..." if prefix else "Listening for follow-up...")
+            utterance = microphone.record_question_after_wake(prefix, wait_s=5.0)
             pre_roll.clear()
+            if utterance is None:
+                print("No question heard; returning to wake-word sleep.")
+                state = ConversationState.SLEEPING
+                continue
             print(f"Recording completed ({utterance.duration_s:.2f} s). Transcribing...")
-            state = ConversationState.TRANSCRIBING
             trace = LatencyTrace(); trace.mark("stt_request")
             with tempfile.TemporaryDirectory(prefix="head-mic-") as directory:
                 wav = microphone.write_wav(utterance, Path(directory) / "utterance.wav")
                 text = service.transcribe_wav(wav)
             trace.mark("stt_complete"); trace.span("STT transcription", "stt_request", "stt_complete")
+            text = question_text(text)
             if not text:
-                print("No usable speech recognized; listening again.")
-                state = ConversationState.WAITING_FOR_WAKE_WORD
+                print("Wake word or no usable question recognized; no Gemini response requested.")
+                state = ConversationState.AWAKE
                 continue
             print(f"You said: {text}")
             state = ConversationState.RESPONDING
@@ -330,7 +343,7 @@ def run_listen_session(service, *, mode, mouth=None, configs=None, debug_audio=F
             if trace.values_ms:
                 slowest = max(trace.values_ms.items(), key=lambda item: item[1])
                 print(f"Slowest measured stage: {slowest[0]} ({slowest[1]:.0f} ms)\n")
-            state = ConversationState.WAITING_FOR_WAKE_WORD
+            state = ConversationState.AWAKE
     finally:
         if head_roll is not None: head_roll.stop()
         microphone.close()

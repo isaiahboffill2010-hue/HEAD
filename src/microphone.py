@@ -165,6 +165,34 @@ class Microphone:
         pcm = b"".join(audio)
         return Utterance(pcm, len(pcm) / (self.rate * 2))
 
+    def record_question_after_wake(self, prefix_pcm: bytes = b"", wait_s: float = 5.0,
+                                   max_s: float = 15.0) -> Utterance | None:
+        """Wait for new speech, then record it; wake-only activation returns None."""
+        if len(prefix_pcm) % 2:
+            raise ValueError("prefix PCM must be S16_LE samples")
+        self.start(); audio: list[bytes] = []; detected = False; silence = 0.0
+        began = self.clock()
+        while self.clock() - began < max_s:
+            frame = self._read_frame()
+            rms = audioop.rms(frame, 2)
+            if not detected:
+                if rms < self.threshold:
+                    if self.clock() - began >= wait_s:
+                        return None
+                    continue
+                detected = True
+                # Preserve the immediate post-wake phrase only after genuine
+                # question speech has started; wake-only audio reaches no API.
+                if prefix_pcm: audio.append(prefix_pcm)
+            audio.append(frame)
+            silence = silence + .02 if rms < self.threshold else 0.0
+            if silence >= self.silence_s:
+                break
+        if not detected:
+            return None
+        pcm = b"".join(audio)
+        return Utterance(pcm, len(pcm) / (self.rate * 2))
+
     def write_wav(self, utterance: Utterance, path: Path) -> Path:
         with wave.open(str(path), "wb") as out:
             out.setnchannels(1); out.setsampwidth(2); out.setframerate(self.rate); out.writeframes(utterance.pcm)
