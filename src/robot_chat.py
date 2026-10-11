@@ -12,8 +12,8 @@ from .gemini_service import GeminiConfig, GeminiError, GeminiService
 from .latency import LatencyTrace
 from .mouth import JAW_NAMES, MouthController
 from .mouth_calibration import _known_reference
-from .servo_controller import (ConfigurationError, NotCalibratedError, RobotHatBackend,
-                               ServoController, load_config, validate_config)
+from .servo_controller import (ConfigurationError, RobotHatBackend,
+                               ServoConfig, ServoController, load_config, validate_config)
 from .streaming_lipsync import StreamingLipSynchronizer
 from .microphone import Microphone
 from .vosk_wake import VoskWakeWord, VoskWakeWordError
@@ -47,6 +47,18 @@ def establish_mouth(configs, controller, input_func=input) -> bool:
             print("Mouth mode requires both jaws at saved closed neutral. Use --voice-only otherwise.")
             return False
     return True
+
+
+def fixed_head_roll_profile(configs):
+    """Return a session-only, bounded P0 animation profile without saving it."""
+    saved = configs.get("head_roll")
+    if saved is not None and saved.port != "P0":
+        raise ConfigurationError("head_roll must use P0")
+    profile = dict(configs)
+    # The user has physically approved these explicit angles. Keep them out of
+    # config/servos.json: a restart still needs a fresh powered reference.
+    profile["head_roll"] = ServoConfig("P0", 70.0, 1, 60.0, 80.0)
+    return profile
 
 
 def _debug_path(debug: bool, suffix: str):
@@ -358,6 +370,8 @@ def main(argv=None):
         if args.head_roll and not args.listen:
             raise ConfigurationError("--head-roll is available only with --listen")
         configs = load_config(Path(__file__).resolve().parents[1] / "config" / "servos.json")
+        if args.head_roll:
+            configs = fixed_head_roll_profile(configs)
         mouth = head_roll = None; controller = None
         if args.initialize_jaws or args.head_roll:
             controller = ServoController(configs, RobotHatBackend())
@@ -369,21 +383,11 @@ def main(argv=None):
             print("Mouth: Ready for this continuously powered session.")
         if args.head_roll:
             assert controller is not None
-            roll_cfg = configs.get("head_roll")
-            if roll_cfg is None:
-                print("Head roll: Disabled — P0 has no saved verified travel range.")
-            else:
-                try:
-                    # A narrow, previously verified range is sufficient. The
-                    # animator uses exactly these saved limits, never desired
-                    # wider targets that have not been physically verified.
-                    validate_config("head_roll", roll_cfg, require_calibrated=True)
-                except (ConfigurationError, NotCalibratedError):
-                    print("Head roll: Disabled — P0 travel limits are not verified; Ziggy will continue without P0 movement.")
-                else:
-                    print("P0 head-roll needs a fresh trusted powered reference for this session.")
-                    if not adopt_head_roll_reference(configs, controller): return 1
-                    head_roll = HeadRollAnimator(controller)
+            validate_config("head_roll", configs["head_roll"], require_calibrated=True)
+            print("P0 head roll uses the session-only fixed 60..80 deg profile. Ctrl+C stops future P0 commands.")
+            print("P0 head-roll needs a fresh trusted powered reference for this session.")
+            if not adopt_head_roll_reference(configs, controller): return 1
+            head_roll = HeadRollAnimator(controller)
         elif not args.listen and not args.initialize_jaws:
             # Interactive and test modes retain their explicit supervised setup.
             controller = ServoController(configs, RobotHatBackend())
