@@ -56,6 +56,11 @@ def generate_complete_text(user: str, service: GeminiService, trace: LatencyTrac
         pieces.append(piece); print(piece, end="", flush=True)
     trace.mark("text_complete"); answer = "".join(pieces).strip()
     print(f"\nGemini finish reason: {service.last_finish_reason}")
+    usage = getattr(service, "last_generation_usage", {})
+    print("Gemini usage: " + ", ".join(
+        f"{name}={usage.get(name, 'unavailable')}" for name in
+        ("output_tokens", "thinking_tokens", "input_tokens", "total_tokens")))
+    print(f"Gemini generation attempts: {getattr(service, 'last_generation_attempts', 1)}")
     return answer
 
 

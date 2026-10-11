@@ -178,14 +178,18 @@ python3 -m compileall -q src tests
 Keep the existing `.env.local`, `config/servos.json`, and verified value in `config/mouth_motion.json`. For a low-latency configuration, set these in `.env.local` only if the startup model check confirms that your API key can access them:
 
 ```dotenv
-GEMINI_CHAT_MODEL=gemini-2.5-flash-lite
-GEMINI_TTS_MODEL=gemini-3.8-flash-lite-tts
+GEMINI_CHAT_MODEL=gemini-3.8-flash
+GEMINI_TTS_MODEL=gemini-3.8-flash-tts
 GEMINI_TTS_VOICE=Despina
-GEMINI_THINKING=0
+GEMINI_THINKING=low
 GEMINI_MAX_HISTORY_TURNS=4
+GEMINI_MAX_OUTPUT_TOKENS=1024
+GEMINI_RETRY_MAX_OUTPUT_TOKENS=2048
 HEAD_AUDIO_BACKEND=pulse
 HEAD_AUDIO_LATENCY_MS=180
 ```
+
+For `gemini-3.8-flash`, `low` is the lowest supported thinking level; do not set `minimal` or a numeric thinking budget for that model. A response that ends with `MAX_TOKENS` is never sent to Despina. HEAD consumes the first attempt completely, retries once at `GEMINI_RETRY_MAX_OUTPUT_TOKENS`, and only speaks the successful complete result. The terminal prints finish reason, available token counts, and the number of attempts.
 
 Test reliable voice-only first, compare streaming, then test the servos:
 

@@ -414,6 +414,22 @@ class ServoControllerTests(unittest.TestCase):
         self.assertEqual(first, [True])
         self.assertEqual(len(service.history), 2)
 
+    def test_short_greeting_uses_low_thinking_and_complete_response(self):
+        stop = type("Finish", (), {"name": "STOP"})()
+        response = type("R", (), {"text": "Hello! How can I help?",
+                                     "candidates": [type("C", (), {"finish_reason": stop})()]})()
+        class Models:
+            def generate_content_stream(self, **kwargs):
+                self.kwargs = kwargs
+                return iter((response,))
+        models = Models()
+        config = GeminiConfig("key", "gemini-3.8-flash", "tts", "Despina", "align", "low", 4, 1024, 2048)
+        service = GeminiService(config, type("Client", (), {"models": models})())
+        self.assertEqual(service.reply("HI"), "Hello! How can I help?")
+        self.assertEqual(models.kwargs["config"]["max_output_tokens"], 1024)
+        self.assertEqual(models.kwargs["config"]["thinking_config"], {"thinking_level": "low"})
+        self.assertEqual(service.last_finish_reason, "STOP")
+
     def test_max_token_finish_is_not_spoken_as_complete_text(self):
         finish = type("Finish", (), {"name": "MAX_TOKENS"})()
         candidate = type("Candidate", (), {"finish_reason": finish})()
@@ -425,6 +441,40 @@ class ServoControllerTests(unittest.TestCase):
         with self.assertRaisesRegex(GeminiError, "token limit"):
             list(service.reply_stream("How was your day?"))
         self.assertEqual(service.history, [])
+
+    def test_token_exhaustion_retries_once_with_larger_budget(self):
+        finish = type("Finish", (), {"name": "MAX_TOKENS"})()
+        capped = type("R", (), {"text": "Incomplete", "candidates": [type("C", (), {"finish_reason": finish})()]})()
+        stop = type("Finish", (), {"name": "STOP"})()
+        usage = type("Usage", (), {"candidates_token_count": 7, "thoughts_token_count": 3,
+                                     "prompt_token_count": 10, "total_token_count": 20})()
+        complete = type("R", (), {"text": "Hello there.", "candidates": [type("C", (), {"finish_reason": stop})()],
+                                  "usage_metadata": usage})()
+        class Models:
+            def __init__(self): self.calls = []
+            def generate_content_stream(self, **kwargs):
+                self.calls.append(kwargs); return iter((capped,) if len(self.calls) == 1 else (complete,))
+        models = Models()
+        config = GeminiConfig("key", "gemini-3.8-flash", "tts", "Despina", "align", "low", 4, 1024, 2048)
+        service = GeminiService(config, type("Client", (), {"models": models})())
+        self.assertEqual("".join(service.reply_stream("HI")), "Hello there.")
+        self.assertEqual(len(models.calls), 2)
+        self.assertEqual(models.calls[0]["config"]["max_output_tokens"], 1024)
+        self.assertEqual(models.calls[1]["config"]["max_output_tokens"], 2048)
+        self.assertEqual(models.calls[0]["config"]["thinking_config"], {"thinking_level": "low"})
+        self.assertEqual(service.last_generation_usage["output_tokens"], 7)
+
+    def test_roleplay_markup_and_physical_description_are_suppressed(self):
+        stop = type("Finish", (), {"name": "STOP"})()
+        response = type("R", (), {"text": "*whirrs softly and blinks* I am ready. I smile at you.",
+                                    "candidates": [type("C", (), {"finish_reason": stop})()]})()
+        class Models:
+            def generate_content_stream(self, **kwargs): return iter((response,))
+        service = GeminiService(GeminiConfig("key", "chat", "tts", "Despina", "align"),
+                                type("Client", (), {"models": Models()})())
+        answer = service.reply("HI")
+        self.assertEqual(answer, "I am ready.")
+        self.assertNotIn("*", answer)
 
     def test_streaming_despina_decodes_raw_pcm_chunks(self):
         import base64
