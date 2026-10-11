@@ -545,6 +545,63 @@ class ServoControllerTests(unittest.TestCase):
         self.assertTrue(all(0 <= value <= 1 for value in mouth.targets))
         self.assertEqual(mouth.targets[-1], 0.0)
 
+    def test_streaming_lipsync_drains_last_words_before_closing(self):
+        import time
+        class Mouth:
+            def __init__(self): self.targets = []
+            def set_openness_step(self, value): self.targets.append(value)
+        mouth = Mouth()
+        sync = StreamingLipSynchronizer(mouth, 20, MotionSettings(25, 60, 240, .02, 25), latency_ms=40)
+        started = time.monotonic(); sync.start()
+        sync.note_tts_pcm_received()
+        sync.submit(b"\xff\x7f" * 480, 0.0)  # final, speech-bearing 20 ms PCM frame
+        sync.finish()
+        self.assertGreaterEqual(time.monotonic() - started, .035)
+        self.assertTrue(any(value > 0 for value in mouth.targets))
+        self.assertEqual(mouth.targets[-1], 0.0)
+        self.assertEqual(sync.diagnostics.shutdown_reason, "drained end-of-stream")
+        self.assertIsNotNone(sync.diagnostics.last_speech_frame_audio_s)
+        self.assertIsNotNone(sync.diagnostics.last_mouth_frame_processed_at)
+
+    def test_delayed_final_tts_chunk_is_processed_before_worker_shutdown(self):
+        import time
+        class Mouth:
+            def __init__(self): self.targets = []
+            def set_openness_step(self, value): self.targets.append(value)
+        mouth = Mouth()
+        sync = StreamingLipSynchronizer(mouth, 20, MotionSettings(25, 60, 240, .02, 25))
+        sync.start()
+        time.sleep(.02)  # Worker must remain ready while the TTS stream is briefly quiet.
+        sync.note_tts_pcm_received()
+        sync.submit(b"\xff\x7f" * 480, 0.04)
+        sync.finish()
+        self.assertTrue(any(value > 0 for value in mouth.targets))
+        self.assertEqual(sync.diagnostics.shutdown_reason, "drained end-of-stream")
+
+    def test_trailing_silence_closes_without_fake_talking(self):
+        class Mouth:
+            def __init__(self): self.targets = []
+            def set_openness_step(self, value): self.targets.append(value)
+        mouth = Mouth()
+        sync = StreamingLipSynchronizer(mouth, 20, MotionSettings(25, 60, 240, .02, 25))
+        sync.start()
+        sync.submit(b"\xff\x7f" * 480, 0.0)
+        sync.submit(b"\x00\x00" * 480, .02)
+        sync.finish()
+        self.assertIsNotNone(sync.diagnostics.last_speech_frame_audio_s)
+        self.assertEqual(sync.diagnostics.final_pcm_audio_end_s, .04)
+        self.assertEqual(mouth.targets[-1], 0.0)
+
+    def test_streaming_lipsync_cancellation_stops_without_draining(self):
+        class Mouth:
+            def __init__(self): self.targets = []
+            def set_openness_step(self, value): self.targets.append(value)
+        mouth = Mouth()
+        sync = StreamingLipSynchronizer(mouth, 20, MotionSettings(25, 60, 240, .02, 25), latency_ms=500)
+        sync.start(); sync.submit(b"\xff\x7f" * 480, 0.0); sync.stop()
+        self.assertEqual(sync.diagnostics.shutdown_reason, "cancelled")
+        self.assertEqual(mouth.targets[-1], 0.0)
+
     def test_multisentence_tiny_text_chunks_are_fully_consumed(self):
         class Service:
             last_finish_reason = "STOP"

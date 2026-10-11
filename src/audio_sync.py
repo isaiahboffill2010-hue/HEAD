@@ -103,6 +103,8 @@ class PlaybackDiagnostics:
     return_code: int | None = None
     producer_error: str | None = None
     dropped_chunks: int = 0
+    last_pcm_submitted_at: float | None = None
+    playback_completed_at: float | None = None
 
 def select_audio_backend(requested: str | None = None, which: Callable[[str], str | None] = shutil.which) -> str:
     """Prefer the desktop user's PipeWire/PulseAudio default sink."""
@@ -221,6 +223,7 @@ class RawPCMPlayer:
                 if not data:
                     continue
                 self.process.stdin.write(data)
+                self.diagnostics.last_pcm_submitted_at = self._clock()
                 if submitted == 0 and on_first_submit:
                     on_first_submit()
                 if on_chunk:
@@ -237,6 +240,7 @@ class RawPCMPlayer:
                 self.process.stdin.close()
             producer.join(timeout=2)
             code = self.process.wait()
+            self.diagnostics.playback_completed_at = self._clock()
         self.diagnostics.bytes_submitted = submitted
         self.diagnostics.samples_submitted = submitted // 2
         self.diagnostics.duration_submitted_s = submitted / (self.sample_rate * 2)

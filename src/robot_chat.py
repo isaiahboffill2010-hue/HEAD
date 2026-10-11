@@ -36,7 +36,7 @@ def _debug_path(debug: bool, suffix: str):
 
 
 def _print_diagnostics(text, segments, diagnostics, *, mode, audio_path=None, alignment=None,
-                       dropped_segments=0):
+                       dropped_segments=0, lip=None):
     print("\nSpeech diagnostics:")
     print(f"  mode: {mode}\n  full response: {text!r}\n  TTS segments ({len(segments)}): {segments!r}")
     print(f"  audio chunks: {diagnostics.chunks}\n  submitted samples: {diagnostics.samples_submitted}")
@@ -44,6 +44,14 @@ def _print_diagnostics(text, segments, diagnostics, *, mode, audio_path=None, al
     print(f"  playback completed normally: {diagnostics.completed_normally}\n  playback return code: {diagnostics.return_code}")
     print(f"  failed producer: {diagnostics.producer_error or 'none'}\n  dropped/failed TTS segments: {dropped_segments}")
     print(f"  dropped mouth-analysis frames: {diagnostics.dropped_chunks}")
+    if lip:
+        detail = lip.diagnostics
+        print("  final TTS PCM frame timestamp: " + str(detail.final_tts_pcm_received_at))
+        print("  last speech-bearing frame timestamp: " + str(detail.last_speech_frame_audio_s))
+        print("  last scheduled mouth movement timestamp: " + str(detail.last_scheduled_mouth_at))
+        print("  audio playback completion timestamp: " + str(detail.playback_completed_at))
+        print("  last mouth-frame processing timestamp: " + str(detail.last_mouth_frame_processed_at))
+        print(f"  mouth worker shutdown reason: {detail.shutdown_reason or 'not finished'}")
     if alignment: print(f"  mouth alignment: {alignment}")
     if audio_path: print(f"  preserved audio: {audio_path}")
 
@@ -107,7 +115,7 @@ def speak_reliable(text, service: GeminiService, *, mouth=None, configs=None, tr
 def speak_streaming(text, service: GeminiService, *, mouth=None, configs=None, trace=None,
                     debug_audio=False, player_factory=RawPCMPlayer):
     """One ordered TTS stream for the entire completed response."""
-    player = player_factory(); lip = None; capture = bytearray(); saved = None
+    player = player_factory(); lip = None; capture = bytearray(); saved = None; lip_finished = False
     if mouth is not None:
         lip = StreamingLipSynchronizer(mouth, calibrated_max_jaw_travel(configs), load_motion_settings())
     def chunks():
@@ -118,6 +126,7 @@ def speak_streaming(text, service: GeminiService, *, mouth=None, configs=None, t
                 trace.add_ms("Audio decoding/preparation", decode_ms)
                 if first: trace.mark("tts_first_chunk")
             first = False
+            if lip: lip.note_tts_pcm_received()
             if debug_audio: capture.extend(data)
             yield data
         tail = b"\x00\x00" * 2880
@@ -132,6 +141,11 @@ def speak_streaming(text, service: GeminiService, *, mouth=None, configs=None, t
             on_first_submit=(lambda: trace.mark("first_audio_submitted")) if trace else None,
             on_chunk=(lambda data, offset: lip.submit(data, offset)) if lip else None)
         if code != 0: raise RuntimeError(f"audio player exited with status {code}")
+        if lip:
+            # RawPCMPlayer has drained paplay/aplay before returning.  Drain the
+            # mouth queue as well; do not treat TTS end-of-stream as mouth EOS.
+            lip.finish(player.diagnostics.playback_completed_at)
+            lip_finished = True
         if lip and trace: trace.add_ms("Speech alignment", lip.analysis_ms)
         if lip: player.diagnostics.dropped_chunks = lip.dropped_chunks
         if debug_audio:
@@ -139,17 +153,18 @@ def speak_streaming(text, service: GeminiService, *, mouth=None, configs=None, t
             with wave.open(str(saved), "wb") as out:
                 out.setnchannels(1); out.setsampwidth(2); out.setframerate(24000); out.writeframes(capture)
         _print_diagnostics(text, [text], player.diagnostics, mode="streaming", audio_path=saved,
-            alignment="incremental 20 ms audio energy (lower accuracy)" if lip else "disabled (voice-only)")
+            alignment="incremental 20 ms audio energy (lower accuracy)" if lip else "disabled (voice-only)", lip=lip)
     except KeyboardInterrupt:
         player.stop()
-        if lip: lip.stop(close=False)
+        if lip: lip.stop(close=True)
         raise
     except BaseException:
+        if lip: lip.stop(close=True)
         _print_diagnostics(text, [text], player.diagnostics, mode="streaming-failed",
-            alignment="incremental energy; stream did not complete", dropped_segments=1)
+            alignment="incremental energy; stream did not complete", dropped_segments=1, lip=lip)
         raise
     finally:
-        if lip and not lip.cancelled.is_set(): lip.stop(close=False)
+        if lip and not lip_finished and not lip.cancelled.is_set(): lip.stop(close=True)
 
 
 speak = speak_reliable
