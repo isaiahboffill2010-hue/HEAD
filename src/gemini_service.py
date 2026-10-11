@@ -1,6 +1,7 @@
 """Google GenAI conversation, Despina TTS, and word-timing adapter."""
 from __future__ import annotations
 import base64, json, os, re, wave
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -23,6 +24,7 @@ class GeminiConfig:
     api_key: str; chat_model: str; tts_model: str; voice: str; align_model: str
     thinking: str = "low"; max_history_turns: int = 4
     max_output_tokens: int = 1024; retry_max_output_tokens: int = 2048
+    transcription_model: str = "gemini-3.5-transcribe"; transcription_timeout_s: float = 20.0
 
     @classmethod
     def from_environment(cls) -> "GeminiConfig":
@@ -33,7 +35,9 @@ class GeminiConfig:
             os.getenv("GEMINI_TTS_VOICE", "Despina"), os.getenv("GEMINI_ALIGN_MODEL", "gemini-3.5-transcribe"),
             os.getenv("GEMINI_THINKING", "low"), max(1, int(os.getenv("GEMINI_MAX_HISTORY_TURNS", "4"))),
             max(1, int(os.getenv("GEMINI_MAX_OUTPUT_TOKENS", "1024"))),
-            max(1, int(os.getenv("GEMINI_RETRY_MAX_OUTPUT_TOKENS", "2048"))))
+            max(1, int(os.getenv("GEMINI_RETRY_MAX_OUTPUT_TOKENS", "2048"))),
+            os.getenv("GEMINI_TRANSCRIPTION_MODEL", "gemini-3.5-transcribe"),
+            max(1.0, float(os.getenv("GEMINI_TRANSCRIPTION_TIMEOUT_S", "20"))))
 
 
 def _audio_bytes(value: Any) -> bytes:
@@ -178,10 +182,27 @@ class GeminiService:
 
     def verify_models(self) -> dict[str, str]:
         result = {}
-        for role, model in (("conversation", self.config.chat_model), ("TTS", self.config.tts_model)):
+        for role, model in (("conversation", self.config.chat_model), ("TTS", self.config.tts_model),
+                            ("transcription", self.config.transcription_model)):
             try: result[role] = getattr(self.client.models.get(model=model), "name", model)
             except Exception as exc: raise GeminiError(f"Configured {role} model {model!r} is unavailable: {exc}") from exc
         return result
+
+    def transcribe_wav(self, path: Path) -> str:
+        """Short VAD-bounded WAV transcription; client/model remain reused per session."""
+        def request() -> str:
+            uploaded = self.client.files.upload(file=str(path))
+            response = self.client.interactions.create(model=self.config.transcription_model, input=[
+                {"type": "audio", "uri": uploaded.uri, "mime_type": "audio/wav"}],
+                generation_config={"transcription_config": {"mode": "smart"}})
+            return (getattr(response, "output_text", "") or "").strip()
+        try:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                return executor.submit(request).result(timeout=self.config.transcription_timeout_s)
+        except FuturesTimeout as exc:
+            raise GeminiError(f"transcription timed out after {self.config.transcription_timeout_s:g} seconds") from exc
+        except Exception as exc:
+            raise GeminiError(f"Gemini transcription failed: {exc}") from exc
 
     def stream_speech(self, text: str) -> Iterator[tuple[bytes, float]]:
         try:

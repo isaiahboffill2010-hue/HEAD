@@ -21,6 +21,7 @@ from src.streaming_lipsync import MouthTuning, StreamingLipSynchronizer
 from src.mouth_diagnostics import analyze_wav, compare_recordings, final_speech_report, write_svg
 from src.robot_chat import generate_complete_text, speak_streaming
 from src.latency import LatencyTrace
+from src.microphone import Microphone
 
 
 class QuietMock(MockBackend):
@@ -875,6 +876,38 @@ class ServoControllerTests(unittest.TestCase):
         clock = player.start()
         self.assertEqual(calls, [["paplay", "test.wav"]])
         self.assertAlmostEqual(clock(), 0.15)
+
+    def test_microphone_vad_keeps_preroll_and_ends_after_silence(self):
+        class Output:
+            def __init__(self, frames): self.frames = iter(frames)
+            def read(self, size): return next(self.frames)
+        class Process:
+            def __init__(self, frames): self.stdout = Output(frames)
+            def poll(self): return 0
+            def terminate(self): pass
+        ticks = iter(index * .02 for index in range(200))
+        quiet = b"\x00\x00" * 320; speech = b"\xff\x7f" * 320
+        frames = [quiet] * 3 + [speech] * 3 + [quiet] * 28
+        mic = Microphone(rate=16000, popen=lambda *args, **kwargs: Process(frames), clock=lambda: next(ticks))
+        mic.threshold = 100; mic.silence_s = .5
+        utterance = mic.listen(max_s=3)
+        self.assertIsNotNone(utterance)
+        self.assertGreater(utterance.duration_s, .5)
+
+    def test_transcription_model_is_verified_and_short_audio_is_sent(self):
+        class Models:
+            def get(self, *, model): return type("M", (), {"name": model})()
+        class Files:
+            def upload(self, *, file): self.file = file; return type("F", (), {"uri": "test://audio"})()
+        class Interactions:
+            def create(self, **kwargs): self.kwargs = kwargs; return type("R", (), {"output_text": " hello head "})()
+        client = type("Client", (), {"models": Models(), "files": Files(), "interactions": Interactions()})()
+        service = GeminiService(GeminiConfig("key", "chat", "tts", "Despina", "align", transcription_model="transcribe"), client)
+        self.assertEqual(service.verify_models()["transcription"], "transcribe")
+        with tempfile.TemporaryDirectory() as directory:
+            wav = Path(directory) / "voice.wav"; wav.write_bytes(b"RIFFtest")
+            self.assertEqual(service.transcribe_wav(wav), "hello head")
+        self.assertEqual(client.interactions.kwargs["model"], "transcribe")
 
 
 if __name__ == "__main__":

@@ -4,6 +4,22 @@ Importing or starting this safety-first application never commands a servo.
 
 ## Exact Raspberry Pi commands
 
+## Hands-free voice conversation
+
+Install/update in one command (this preserves `.env.local` and all calibration files):
+
+```bash
+sudo apt-get update && sudo apt-get install -y alsa-utils && cd ~/HEAD && git pull origin main && python3 -m pip install -r requirements.txt
+```
+
+List USB/ALSA capture devices with `python3 -m src.robot_chat --list-mics`; set the desired ALSA device in `.env.local` as `HEAD_MIC_DEVICE=default` or an explicit `plughw:CARD=...,DEV=...`. Launch hands-free streaming conversation with:
+
+```bash
+python3 -m src.robot_chat --listen --streaming
+```
+
+The capture process remains open between turns, uses 16 kHz mono S16_LE and lightweight energy VAD, retains 300 ms of pre-roll, stops after 550 ms silence (configurable 450–600 ms), and limits utterances to 15 seconds. It does not read microphone frames while HEAD is speaking. Gemini verifies the configured transcription model at startup and transcribes each short WAV with `gemini-3.5-transcribe` by default.
+
 From the repository directory, run the first no-movement command:
 
 ```bash

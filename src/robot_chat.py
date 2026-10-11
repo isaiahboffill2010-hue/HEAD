@@ -12,6 +12,7 @@ from .mouth import JAW_NAMES, MouthController
 from .mouth_calibration import _known_reference
 from .servo_controller import ConfigurationError, RobotHatBackend, ServoController, load_config
 from .streaming_lipsync import StreamingLipSynchronizer
+from .microphone import Microphone
 
 
 def establish_mouth(configs, controller, input_func=input) -> bool:
@@ -242,6 +243,38 @@ def run_session(service, *, voice_only, mode="reliable", mouth=None, configs=Non
         except RuntimeError as exc: print(f"Audio error: {exc}")
 
 
+def run_listen_session(service, *, mode, mouth=None, configs=None, debug_audio=False) -> int:
+    """Hands-free turns. Capture remains open; it is idle while HEAD speaks."""
+    microphone = Microphone()
+    print(f"HEAD ROBOT - HANDS-FREE ({mode} mode). Ctrl+C to stop. Mic: {microphone.device}")
+    try:
+        while True:
+            print("Listening...")
+            utterance = microphone.listen()
+            if utterance is None:
+                print("No speech detected; listening again."); continue
+            print(f"Recording completed ({utterance.duration_s:.2f} s). Transcribing...")
+            trace = LatencyTrace(); trace.mark("stt_request")
+            with tempfile.TemporaryDirectory(prefix="head-mic-") as directory:
+                wav = microphone.write_wav(utterance, Path(directory) / "utterance.wav")
+                text = service.transcribe_wav(wav)
+            trace.mark("stt_complete"); trace.span("STT transcription", "stt_request", "stt_complete")
+            if not text:
+                print("No usable speech recognized; listening again."); continue
+            print(f"You said: {text}")
+            answer = generate_complete_text(text, service, trace)
+            helper = speak_streaming if mode == "streaming" else speak_reliable
+            helper(answer, service, mouth=mouth, configs=configs, trace=trace, debug_audio=debug_audio)
+            trace.finish(float(__import__("os").getenv("HEAD_AUDIO_LATENCY_MS", "0")))
+            trace.span("End of speech to first audio", "stt_complete", "first_audio_submitted")
+            print("\n" + trace.format())
+            if trace.values_ms:
+                slowest = max(trace.values_ms.items(), key=lambda item: item[1])
+                print(f"Slowest measured stage: {slowest[0]} ({slowest[1]:.0f} ms)\n")
+    finally:
+        microphone.close()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Gemini + Despina HEAD robot terminal chat")
     modes = parser.add_mutually_exclusive_group()
@@ -252,10 +285,14 @@ def main(argv=None):
     parser.add_argument("--mouth-offset-calibration", action="store_true",
                         help="supervised 0/100/200/300 ms jaw-only timing comparison")
     parser.add_argument("--voice-test", action="store_true")
+    parser.add_argument("--listen", action="store_true", help="persistent microphone VAD -> Gemini STT -> reply loop")
+    parser.add_argument("--list-mics", action="store_true", help="list ALSA capture devices and exit")
     parser.add_argument("--debug-audio", action="store_true")
     parser.add_argument("--skip-model-check", action="store_true")
     args = parser.parse_args(argv); mode = "streaming" if args.streaming else "reliable"
     try:
+        if args.list_mics:
+            print(Microphone.devices()); return 0
         service = GeminiService(GeminiConfig.from_environment())
         if not args.skip_model_check:
             found = service.verify_models(); print("Verified models:", ", ".join(f"{k}={v}" for k, v in found.items()))
@@ -272,6 +309,8 @@ def main(argv=None):
             (speak_streaming if mode == "streaming" else speak_reliable)(
                 "Hello, this is a short mouth synchronization test.", service,
                 mouth=mouth, configs=configs, debug_audio=args.debug_audio); return 0
+        if args.listen:
+            return run_listen_session(service, mode=mode, mouth=mouth, configs=configs, debug_audio=args.debug_audio)
         return run_session(service, voice_only=False, mode=mode, mouth=mouth,
                            configs=configs, debug_audio=args.debug_audio)
     except KeyboardInterrupt:
