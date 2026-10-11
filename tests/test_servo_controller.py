@@ -1066,10 +1066,12 @@ class ServoControllerTests(unittest.TestCase):
         self.assertEqual(backend.commands, [])
 
     def test_wide_head_roll_setup_saves_65_to_75_only_after_both_sides_safe(self):
-        configs = {"head_roll": ServoConfig("P0", 70, 1, 68, 72)}
+        configs = {"head_roll": ServoConfig("P0", 70, 1, None, None)}
         backend = QuietMock(); controller = ServoController(configs, backend, sleep=lambda _: None)
-        replies = iter(["72", "POWERED", "TEST 73", "SAFE", "TEST 74", "SAFE", "TEST 75", "SAFE",
-                        "CROSS 68", "TEST 67", "SAFE", "TEST 66", "SAFE", "TEST 65", "SAFE"])
+        replies = iter(["70", "POWERED", "TEST 71", "SAFE", "TEST 72", "SAFE", "TEST 73", "SAFE",
+                        "TEST 74", "SAFE", "TEST 75", "SAFE", "TEST 74", "SAFE", "TEST 73", "SAFE",
+                        "TEST 72", "SAFE", "TEST 71", "SAFE", "TEST 70", "SAFE", "TEST 69", "SAFE",
+                        "TEST 68", "SAFE", "TEST 67", "SAFE", "TEST 66", "SAFE", "TEST 65", "SAFE"])
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "servos.json"
             self.assertEqual(wide_head_roll(configs, controller, path, input_func=lambda _: next(replies)), 0)
@@ -1078,14 +1080,14 @@ class ServoControllerTests(unittest.TestCase):
         self.assertTrue(all(port == "P0" and 65 <= angle <= 75 for port, angle in backend.commands))
 
     def test_wide_head_roll_interruption_preserves_saved_range(self):
-        configs = {"head_roll": ServoConfig("P0", 70, 1, 68, 72)}
+        configs = {"head_roll": ServoConfig("P0", 70, 1, None, None)}
         backend = QuietMock(); controller = ServoController(configs, backend, sleep=lambda _: None)
-        replies = iter(["72", "POWERED", "TEST 73", "STOP"])
+        replies = iter(["70", "POWERED", "TEST 71", "STOP"])
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "servos.json"; save_config(path, configs)
             self.assertEqual(wide_head_roll(configs, controller, path, input_func=lambda _: next(replies)), 1)
             saved = load_config(path)["head_roll"]
-        self.assertEqual((saved.min_angle, saved.max_angle), (68, 72))
+        self.assertEqual((saved.min_angle, saved.max_angle), (None, None))
 
     def test_microphone_uses_one_continuous_raw_process_for_multiple_turns(self):
         calls = []

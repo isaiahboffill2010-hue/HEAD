@@ -129,7 +129,7 @@ def _verify_target_side(controller, *, direction: int, target: float, input_func
     return True
 
 
-def wide(configs, controller, path: Path, input_func=input) -> int:
+def _legacy_wide(configs, controller, path: Path, input_func=input) -> int:
     """Supervised 65..75° target setup from the existing verified P0 range."""
     cfg = configs[NAME]; validate_config(NAME, cfg, require_calibrated=True)
     assert cfg.min_angle is not None and cfg.max_angle is not None
@@ -158,6 +158,34 @@ def wide(configs, controller, path: Path, input_func=input) -> int:
         if input_func(f"Type CROSS {cfg.max_angle:g} to move P0 only through the existing verified range, or STOP: ").strip() != f"CROSS {cfg.max_angle:g}": return 1
         controller.move_to(NAME, cfg.max_angle, speed_dps=5, step=.25)
         if not _verify_target_side(controller, direction=1, target=target_high, input_func=input_func): return 1
+    cfg.min_angle, cfg.max_angle = target_low, target_high
+    save_config(path, configs)
+    print("Saved verified P0 range 65..75 deg. Future supervised P0 animation uses these limits.")
+    return 0
+
+
+def wide(configs, controller, path: Path, input_func=input) -> int:
+    """Establish a 65..75 degree automatic range from neutral-only P0 data."""
+    cfg = configs[NAME]
+    if cfg.neutral is None:
+        raise ConfigurationError("P0 wide setup needs a saved head_roll neutral; run mechanical calibration first")
+    center, target_low, target_high = float(cfg.neutral), 65.0, 75.0
+    print(f"P0 wide setup: saved neutral {center:g} deg; target {target_low:g}..{target_high:g} deg.")
+    if not cfg.calibrated:
+        print("P0 travel limits are incomplete. Automatic head roll remains disabled until this supervised setup finishes.")
+    if not adopt_head_roll_reference(configs, controller, input_func): return 1
+    if controller.position(NAME) != center:
+        print(f"Confirm P0 at its saved neutral {center:g} deg before wide setup; no movement was sent.")
+        return 1
+    # All movements, including return travel, are one degree and require the
+    # same TEST/SAFE confirmation.  Do not mutate or save limits mid-run.
+    route = list(range(int(center + 1), int(target_high) + 1))
+    route += list(range(int(target_high - 1), int(center) - 1, -1))
+    route += list(range(int(center - 1), int(target_low) - 1, -1))
+    for target in route:
+        if not _step_to(controller, float(target), input_func):
+            print("Wide range was not saved; existing calibration remains unchanged.")
+            return 1
     cfg.min_angle, cfg.max_angle = target_low, target_high
     save_config(path, configs)
     print("Saved verified P0 range 65..75 deg. Future supervised P0 animation uses these limits.")
