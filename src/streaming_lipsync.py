@@ -26,6 +26,35 @@ class StreamingLipSyncDiagnostics:
     last_mouth_frame_processed_at: float | None = None
     dropped_frames: int = 0
     shutdown_reason: str | None = None
+    speech_frames: int = 0
+    quiet_frames: int = 0
+    commanded_frames: int = 0
+    stationary_commands_suppressed: int = 0
+
+
+@dataclass(frozen=True)
+class MouthTuning:
+    """Software-only energy/motion controls; never alter calibrated endpoints."""
+    sensitivity: float = 1.0
+    max_openness: float = 0.72
+    smoothing: float = 0.0
+    command_deadband_deg: float = 0.5
+
+    @classmethod
+    def from_environment(cls) -> "MouthTuning":
+        value = cls(float(os.getenv("HEAD_MOUTH_SENSITIVITY", "1.0")),
+                    float(os.getenv("HEAD_MOUTH_MAX_OPENNESS", "0.72")),
+                    float(os.getenv("HEAD_MOUTH_SMOOTHING", "0")),
+                    float(os.getenv("HEAD_MOUTH_COMMAND_DEADBAND_DEG", "0.5")))
+        if not .25 <= value.sensitivity <= 4:
+            raise ValueError("HEAD_MOUTH_SENSITIVITY must be between 0.25 and 4")
+        if not .05 <= value.max_openness <= 1:
+            raise ValueError("HEAD_MOUTH_MAX_OPENNESS must be between 0.05 and 1")
+        if not 0 <= value.smoothing <= .95:
+            raise ValueError("HEAD_MOUTH_SMOOTHING must be between 0 and 0.95")
+        if not .1 <= value.command_deadband_deg <= 2:
+            raise ValueError("HEAD_MOUTH_COMMAND_DEADBAND_DEG must be between 0.1 and 2")
+        return value
 
 
 class StreamingLipSynchronizer:
@@ -37,7 +66,8 @@ class StreamingLipSynchronizer:
     """
     def __init__(self, mouth, max_jaw_travel_deg: float, settings: MotionSettings,
                  sample_rate: int = 24000, clock=time.monotonic,
-                 latency_ms: float | None = None, mouth_offset_ms: float | None = None) -> None:
+                 latency_ms: float | None = None, mouth_offset_ms: float | None = None,
+                 tuning: MouthTuning | None = None) -> None:
         self.mouth, self.settings = mouth, settings
         self.sample_rate, self.clock = sample_rate, clock
         self.max_jaw_travel_deg = max_jaw_travel_deg
@@ -49,6 +79,9 @@ class StreamingLipSynchronizer:
         self._position = 0.0
         self._last = None
         self._started = None
+        self._smoothed_target = 0.0
+        self._last_commanded_position = 0.0
+        self.motion_records: list[dict[str, float | bool]] = []
         self.dropped_chunks = 0
         self.diagnostics = StreamingLipSyncDiagnostics()
         self._logger = logging.getLogger(__name__)
@@ -59,6 +92,7 @@ class StreamingLipSynchronizer:
             raise ValueError("HEAD_MOUTH_OFFSET_MS cannot be negative")
         self.mouth_offset_s = offset / 1000
         self.effective_delay_s = self.latency_s + self.mouth_offset_s
+        self.tuning = tuning or MouthTuning.from_environment()
 
     def start(self) -> None:
         self._started = self._last = self.clock()
@@ -97,18 +131,36 @@ class StreamingLipSynchronizer:
             began = self.clock()
             rms = audioop.rms(pcm, 2) if pcm else 0
             peak = max(float(rms), peak * 0.995)
-            target = 0.0 if rms < peak * 0.07 else min(0.72, (rms / peak) ** 0.5 * 0.72)
+            threshold = peak * (0.07 / self.tuning.sensitivity)
+            raw_target = 0.0 if rms < threshold else min(
+                self.tuning.max_openness, (rms / peak) ** 0.5 * self.tuning.max_openness)
+            target = self._smoothed_target * self.tuning.smoothing + raw_target * (1 - self.tuning.smoothing)
+            self._smoothed_target = target
             if target > 0:
+                self.diagnostics.speech_frames += 1
                 self.diagnostics.last_speech_frame_audio_s = audio_time
                 self.diagnostics.last_speech_audio_end_s = audio_time + len(pcm) / (self.sample_rate * 2)
+            else:
+                self.diagnostics.quiet_frames += 1
             now = self.clock()
             dt = max(0.001, now - (self._last or now))
             self._last = now
             allowed = speed_fraction * dt
             self._position += max(-allowed, min(allowed, target - self._position))
-            self.mouth.set_openness_step(max(0.0, min(1.0, self._position)))
+            position = max(0.0, min(1.0, self._position))
+            command = abs(position - self._last_commanded_position) >= (
+                self.tuning.command_deadband_deg / self.max_jaw_travel_deg)
+            if command:
+                self.mouth.set_openness_step(position)
+                self._last_commanded_position = position
+                self.diagnostics.commanded_frames += 1
+            else:
+                self.diagnostics.stationary_commands_suppressed += 1
+            self.motion_records.append({"audio_time": audio_time, "rms": float(rms), "threshold": threshold,
+                                        "target": target, "openness": position, "commanded": command})
             if target > 0:
-                self.diagnostics.last_speech_mouth_command_at = self.clock()
+                if command:
+                    self.diagnostics.last_speech_mouth_command_at = self.clock()
             self.diagnostics.last_scheduled_mouth_at = due
             self.diagnostics.last_mouth_frame_processed_at = self.clock()
             self.analysis_ms += (self.clock() - began) * 1000
@@ -127,13 +179,16 @@ class StreamingLipSynchronizer:
                 playback_started_at + self.latency_s + self.diagnostics.last_speech_audio_end_s)
         if close and not self.cancelled.is_set():
             self.mouth.set_openness_step(0.0)
+            self.diagnostics.commanded_frames += 1
         self._logger.debug(
             "mouth EOS final_tts_pcm=%s last_speech_audio=%s last_scheduled=%s playback_complete=%s "
-            "last_processed=%s dropped=%s shutdown=%s audio_delay=%.3f mouth_offset=%.3f",
+            "last_processed=%s dropped=%s shutdown=%s audio_delay=%.3f mouth_offset=%.3f speech=%s quiet=%s commands=%s suppressed=%s",
             self.diagnostics.final_tts_pcm_received_at, self.diagnostics.last_speech_frame_audio_s,
             self.diagnostics.last_scheduled_mouth_at, self.diagnostics.playback_completed_at,
             self.diagnostics.last_mouth_frame_processed_at, self.diagnostics.dropped_frames,
-            self.diagnostics.shutdown_reason, self.latency_s, self.mouth_offset_s)
+            self.diagnostics.shutdown_reason, self.latency_s, self.mouth_offset_s,
+            self.diagnostics.speech_frames, self.diagnostics.quiet_frames,
+            self.diagnostics.commanded_frames, self.diagnostics.stationary_commands_suppressed)
 
     def stop(self, close: bool = True) -> None:
         """Cancel immediately (interrupt/error path); no queued command is retained."""

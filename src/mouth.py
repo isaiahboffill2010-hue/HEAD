@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import time
+import logging
 from typing import Callable
 
 from .servo_controller import ConfigurationError, ServoController
@@ -16,6 +17,8 @@ class MouthController:
     def __init__(self, controller: ServoController, sleep: Callable[[float], None] = time.sleep) -> None:
         self.controller = controller
         self._sleep = sleep
+        self.command_log: list[dict[str, float]] = []
+        self._logger = logging.getLogger(__name__)
 
     def _jaw(self, name: str):
         if name not in JAW_NAMES:
@@ -65,6 +68,11 @@ class MouthController:
             raise ConfigurationError("Both jaw starting positions must be explicitly established")
         for name in JAW_NAMES:
             self.controller.move_confirmed_position(name, targets[name])
+        record = {"timestamp": time.monotonic(), "openness": amount,
+                  "upper_jaw_angle": targets["upper_jaw"], "lower_jaw_angle": targets["lower_jaw"]}
+        self.command_log.append(record)
+        self._logger.debug("jaw command timestamp=%.6f openness=%.4f upper=%.3f lower=%.3f (commanded, not measured)",
+                           record["timestamp"], amount, record["upper_jaw_angle"], record["lower_jaw_angle"])
 
     def open(self, amount: float = 0.5, speed_dps: float = 10.0) -> None:
         self.set_openness(amount, speed_dps)

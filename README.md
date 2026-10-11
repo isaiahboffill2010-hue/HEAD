@@ -149,6 +149,14 @@ To compare safe timing offsets without changing servo speed, endpoints, or calib
 python3 -m src.robot_chat --streaming --mouth-offset-calibration
 ```
 
+Streaming lip-sync uses 20 ms PCM-energy frames, then rate-limits generated openness to the verified (or conservative) jaw speed. Very small per-frame target changes can be physically ineffective even though the Robot HAT receives a command. To avoid repeatedly sending such stationary commands, HEAD coalesces changes smaller than `HEAD_MOUTH_COMMAND_DEADBAND_DEG` (default `0.5`; range `0.1..2`). This does not increase speed or change endpoints. You may tune `HEAD_MOUTH_SENSITIVITY` (`0.25..4`), `HEAD_MOUTH_MAX_OPENNESS` (`0.05..1`), and `HEAD_MOUTH_SMOOTHING` (`0..0.95`) in `.env.local`; start with the defaults and change one value at a time. Sensitivity can help quiet final words; it never opens the mouth for PCM detected as genuine silence.
+
+Run a response with `--debug-audio` to preserve its WAV, energy/openess timeline CSV, and commanded-jaw-angle CSV. Jaw angles are commands only, not shaft-position feedback. The offline tool reads a preserved WAV and produces a CSV plus dependency-free SVG graph without initializing any hardware:
+
+```bash
+python3 -m src.mouth_diagnostics debug_audio/head-YYYYMMDD-HHMMSS.wav
+```
+
 ## Reliable and streaming conversation modes
 
 Reliable mode is the temporary default. It fully consumes Gemini text, submits the complete response to Despina once, validates word timings against the generated WAV duration, precomputes speed-reachable syllable pulses, and starts WAV playback plus `AdaptiveLipSynchronizer` from one latency-adjusted clock. If alignment is unavailable or invalid, it uses 40 ms energy windows from the actual audio and labels that fallback as approximate.

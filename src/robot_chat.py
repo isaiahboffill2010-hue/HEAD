@@ -1,6 +1,6 @@
 """Reliable and streaming Gemini + Despina terminal conversation."""
 from __future__ import annotations
-import argparse, tempfile, time, wave
+import argparse, csv, tempfile, time, wave
 from pathlib import Path
 
 from .adaptive_lipsync import AdaptiveLipSynchronizer, calibrated_max_jaw_travel, load_motion_settings
@@ -57,6 +57,8 @@ def _print_diagnostics(text, segments, diagnostics, *, mode, audio_path=None, al
         print("  audio playback completion timestamp: " + str(detail.playback_completed_at))
         print("  last mouth-frame processing timestamp: " + str(detail.last_mouth_frame_processed_at))
         print(f"  mouth worker shutdown reason: {detail.shutdown_reason or 'not finished'}")
+        print(f"  speech/quiet analysis frames: {detail.speech_frames}/{detail.quiet_frames}")
+        print(f"  commanded/suppressed stationary mouth frames: {detail.commanded_frames}/{detail.stationary_commands_suppressed}")
     if alignment: print(f"  mouth alignment: {alignment}")
     if audio_path: print(f"  preserved audio: {audio_path}")
 
@@ -121,6 +123,8 @@ def speak_streaming(text, service: GeminiService, *, mouth=None, configs=None, t
                     debug_audio=False, player_factory=RawPCMPlayer, mouth_offset_ms=None):
     """One ordered TTS stream for the entire completed response."""
     player = player_factory(); lip = None; capture = bytearray(); saved = None; lip_finished = False
+    if mouth is not None and debug_audio and hasattr(mouth, "command_log"):
+        mouth.command_log.clear()
     if mouth is not None:
         lip = StreamingLipSynchronizer(mouth, calibrated_max_jaw_travel(configs), load_motion_settings(),
                                        mouth_offset_ms=mouth_offset_ms)
@@ -159,6 +163,18 @@ def speak_streaming(text, service: GeminiService, *, mouth=None, configs=None, t
             saved, _ = _debug_path(True, "wav")
             with wave.open(str(saved), "wb") as out:
                 out.setnchannels(1); out.setsampwidth(2); out.setframerate(24000); out.writeframes(capture)
+            if lip:
+                timeline = saved.with_suffix(".mouth.csv")
+                with timeline.open("w", newline="", encoding="utf-8") as out:
+                    writer = csv.DictWriter(out, fieldnames=("audio_time", "rms", "threshold", "target", "openness", "commanded"))
+                    writer.writeheader(); writer.writerows(lip.motion_records)
+                print(f"  preserved mouth analysis: {timeline}")
+            if mouth is not None and getattr(mouth, "command_log", None):
+                commands = saved.with_suffix(".jaw-commands.csv")
+                with commands.open("w", newline="", encoding="utf-8") as out:
+                    writer = csv.DictWriter(out, fieldnames=("timestamp", "openness", "upper_jaw_angle", "lower_jaw_angle"))
+                    writer.writeheader(); writer.writerows(mouth.command_log)
+                print(f"  preserved commanded jaw log (not position feedback): {commands}")
         _print_diagnostics(text, [text], player.diagnostics, mode="streaming", audio_path=saved,
             alignment="incremental 20 ms audio energy (lower accuracy)" if lip else "disabled (voice-only)", lip=lip)
     except KeyboardInterrupt:

@@ -17,7 +17,8 @@ from src.adaptive_lipsync import (AdaptiveLipSynchronizer, MotionSettings,
 from src.audio_sync import (AudioPlayer, PlaybackDiagnostics, RawPCMPlayer, energy_events,
     select_audio_backend, validate_word_timings, word_events)
 from src.gemini_service import GeminiConfig, GeminiError, GeminiService, parse_word_timings, write_wav
-from src.streaming_lipsync import StreamingLipSynchronizer
+from src.streaming_lipsync import MouthTuning, StreamingLipSynchronizer
+from src.mouth_diagnostics import analyze_wav, write_svg
 from src.robot_chat import generate_complete_text, speak_streaming
 from src.latency import LatencyTrace
 
@@ -626,6 +627,32 @@ class ServoControllerTests(unittest.TestCase):
         sync.start(); sync.submit(b"\xff\x7f" * 480, 0.0); sync.stop()
         self.assertEqual(sync.diagnostics.shutdown_reason, "cancelled")
         self.assertEqual(mouth.targets[-1], 0.0)
+
+    def test_streaming_lipsync_reports_stationary_commands_and_quiet_frames(self):
+        class Mouth:
+            def __init__(self): self.targets = []
+            def set_openness_step(self, value): self.targets.append(value)
+        mouth = Mouth()
+        tuning = MouthTuning(sensitivity=1, max_openness=.72, smoothing=0, command_deadband_deg=.5)
+        sync = StreamingLipSynchronizer(mouth, 20, MotionSettings(25, 60, 240, .02, 25), tuning=tuning)
+        sync.start(); sync.submit(b"\xff\x7f" * 480, 0.0); sync.submit(b"\x00\x00" * 480, .02); sync.finish()
+        self.assertEqual(len(sync.motion_records), 2)
+        self.assertEqual(sync.diagnostics.quiet_frames, 1)
+        self.assertGreaterEqual(sync.diagnostics.commanded_frames, 1)  # final safe close
+        self.assertGreaterEqual(sync.diagnostics.stationary_commands_suppressed, 0)
+
+    def test_offline_mouth_diagnostic_writes_energy_and_motion_graph_without_hardware(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wav_path = Path(directory) / "despina.wav"; svg_path = Path(directory) / "mouth.svg"
+            with wave.open(str(wav_path), "wb") as out:
+                out.setnchannels(1); out.setsampwidth(2); out.setframerate(24000)
+                out.writeframes(b"\x00\x00" * 480 + b"\xff\x7f" * 480)
+            records = analyze_wav(wav_path, tuning=MouthTuning(command_deadband_deg=.1))
+            write_svg(records, svg_path)
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[0]["target"], 0.0)
+            self.assertGreater(records[1]["target"], 0.0)
+            self.assertIn("generated jaw openness", svg_path.read_text(encoding="utf-8"))
 
     def test_multisentence_tiny_text_chunks_are_fully_consumed(self):
         class Service:
