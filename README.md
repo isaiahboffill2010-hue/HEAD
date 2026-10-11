@@ -106,7 +106,13 @@ Run the dedicated supervised calibration command. It starts at 8 degrees/second 
 python3 -m src.mouth_calibration speed
 ```
 
-Once a stage passes, its value is atomically saved as `verified_practical_speed_dps` and normal Gemini/Despina lip sync uses it automatically. Do not accept a stage from a mock test. Stop and physically disconnect servo power if either jaw strains, binds, or chatters.
+Once a stage passes, its value is atomically saved as the verified maximum and normal Gemini/Despina lip sync uses it automatically unless a lower operating speed is selected. To safely select a lower operating speed without implying the previous maximum was unsafe, run a supervised one-cycle test that requires the same powered references and `PASS` before it saves:
+
+```bash
+python3 -m src.mouth_calibration speed --target-speed 15
+```
+
+This stores `selected_operating_speed_dps: 15` while retaining the verified maximum (for example, 25) in `config/mouth_motion.json`. A target above the verified maximum is rejected before any motion. Do not accept a stage from a mock test. Stop and physically disconnect servo power if either jaw strains, binds, or chatters.
 
 ## Phase 2: Gemini + Despina terminal chat
 

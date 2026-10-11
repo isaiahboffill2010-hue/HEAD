@@ -281,8 +281,37 @@ class ServoControllerTests(unittest.TestCase):
             )
             self.assertEqual(result, 0)
             self.assertEqual(load_motion_settings(path).verified_practical_speed_dps, 8.0)
+            self.assertEqual(load_motion_settings(path).selected_operating_speed_dps, 8.0)
         self.assertEqual(controller.position("upper_jaw"), 1)
         self.assertEqual(controller.position("lower_jaw"), 15)
+
+    def test_target_speed_preserves_verified_maximum_and_selects_lower_operating_speed(self):
+        upper = ServoConfig("P8", 1, 1, None, None, 21, 1)
+        lower = ServoConfig("P10", 15, 1, None, None, 0, -1)
+        controller = ServoController({"upper_jaw": upper, "lower_jaw": lower}, self.backend, sleep=lambda _: None)
+        answers = iter(["1", "POWERED", "15", "POWERED", "RUN 15", "PASS"])
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "motion.json"
+            path.write_text(json.dumps({"conservative_speed_dps": 8, "hard_software_speed_cap_dps": 60,
+                                        "acceleration_dps2": 240, "update_interval_s": .02,
+                                        "verified_practical_speed_dps": 25}))
+            self.assertEqual(speed_calibration({"upper_jaw": upper, "lower_jaw": lower}, controller, path,
+                                               input_func=lambda _: next(answers), target_speed=15), 0)
+            settings = load_motion_settings(path)
+            self.assertEqual(settings.maximum_speed(), 25)
+            self.assertEqual(settings.selected_operating_speed_dps, 15)
+            self.assertEqual(settings.speed(), 15)
+
+    def test_target_speed_rejects_above_verified_maximum_without_motion(self):
+        upper = ServoConfig("P8", 1, 1, None, None, 21, 1)
+        lower = ServoConfig("P10", 15, 1, None, None, 0, -1)
+        controller = ServoController({"upper_jaw": upper, "lower_jaw": lower}, self.backend, sleep=lambda _: None)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "motion.json"
+            path.write_text(json.dumps({"verified_practical_speed_dps": 25}))
+            with self.assertRaisesRegex(ValueError, "exceeds"):
+                speed_calibration({"upper_jaw": upper, "lower_jaw": lower}, controller, path, target_speed=30)
+        self.assertEqual(self.backend.commands, [])
 
     def test_animation_cancellation_does_not_issue_a_recovery_close(self):
         class InterruptingMouth:

@@ -130,13 +130,21 @@ def combined_test(configs, controller, speed: float, input_func=input) -> int:
     return 0
 
 
-def speed_calibration(configs, controller, path: Path = DEFAULT_SETTINGS, input_func=input) -> int:
+def speed_calibration(configs, controller, path: Path = DEFAULT_SETTINGS, input_func=input,
+                      target_speed: float | None = None) -> int:
     """Supervised, progressively faster one-cycle jaw test.
 
     Every stage requires an immediate RUN confirmation. A speed is persisted
     only after the operator explicitly reports a clean, unstrained cycle.
     """
     settings = load_motion_settings(path)
+    maximum = settings.maximum_speed()
+    if target_speed is not None:
+        if maximum is None:
+            raise ValueError("cannot select a target speed before a maximum speed has been physically verified")
+        settings.speed(target_speed)
+        if target_speed > maximum:
+            raise ValueError("target speed exceeds the existing verified maximum")
     for name in JAW_NAMES:
         cfg = configs[name]
         if cfg.neutral is None or cfg.opening_endpoint is None or cfg.opening_direction is None:
@@ -151,10 +159,22 @@ def speed_calibration(configs, controller, path: Path = DEFAULT_SETTINGS, input_
         if controller.position(name) != cfg.neutral:
             print("Speed calibration starts only with both jaws at saved closed neutral.")
             return 1
+    if target_speed is not None:
+        assert maximum is not None
+        print(f"\nTarget operating speed: {target_speed:g} deg/s (verified maximum remains {maximum:g} deg/s).")
+        command = input_func(f"Type RUN {target_speed:g} to test this operating speed, or STOP: ").strip()
+        if command != f"RUN {target_speed:g}":
+            print("Target-speed test not confirmed; no movement was sent."); return 1
+        mouth = MouthController(controller); mouth.open(1.0, target_speed); mouth.close(target_speed)
+        if input_func("Type PASS only if motion was clean, or STOP: ").strip().upper() != "PASS":
+            print("Target speed was not saved. Disconnect power if anything looked unsafe."); return 1
+        save_motion_settings(replace(settings, selected_operating_speed_dps=float(target_speed)), path)
+        print(f"Saved operating speed {target_speed:g} deg/s; verified maximum remains {maximum:g} deg/s.")
+        return 0
     stages = [speed for speed in (8, 12, 16, 20, 25, 30, 40, 50, 60)
               if speed <= settings.hard_software_speed_cap_dps]
     mouth = MouthController(controller)
-    accepted = settings.verified_practical_speed_dps
+    accepted = maximum
     for speed in stages:
         if accepted is not None and speed <= accepted:
             continue
@@ -171,14 +191,20 @@ def speed_calibration(configs, controller, path: Path = DEFAULT_SETTINGS, input_
         if result != "PASS":
             print("Stage not accepted; it was not saved. Disconnect power if anything looked unsafe.")
             break
-        accepted = float(speed)
-        settings = replace(settings, verified_practical_speed_dps=accepted)
+        prior_maximum = accepted; accepted = float(speed)
+        selected = settings.selected_operating_speed_dps
+        # Preserve an explicitly chosen lower operating speed; legacy behavior
+        # otherwise selects the newly verified maximum for normal speech.
+        if selected is None or selected == prior_maximum:
+            selected = accepted
+        settings = replace(settings, verified_practical_speed_dps=accepted,
+                           maximum_verified_speed_dps=accepted, selected_operating_speed_dps=selected)
         save_motion_settings(settings, path)
         print(f"Accepted and saved {speed:g} deg/s as the verified practical speed.")
     if accepted is None:
         print("No speed was accepted; conservative speech speed remains in use.")
     else:
-        print(f"Calibration finished. Normal lip sync will use {accepted:g} deg/s.")
+        print(f"Calibration finished. Verified maximum is {accepted:g} deg/s; normal lip sync uses {settings.speed():g} deg/s.")
     return 0
 
 
@@ -232,6 +258,8 @@ def build_parser():
                       help="degrees per second; capped by config/mouth_motion.json")
     speed = sub.add_parser("speed", help="interactively test and save progressively faster mouth speeds")
     speed.add_argument("--motion-config", type=Path, default=DEFAULT_SETTINGS)
+    speed.add_argument("--target-speed", type=float,
+                       help="supervised lower operating speed; must not exceed existing verified maximum")
     bench = sub.add_parser("latency", help="supervised P8/P10 software-call latency benchmark")
     bench.add_argument("--samples", type=int, default=20)
     return parser
@@ -247,7 +275,7 @@ def main(argv=None) -> int:
         if args.command == "test":
             return combined_test(configs, controller, args.speed)
         if args.command == "speed":
-            return speed_calibration(configs, controller, args.motion_config)
+            return speed_calibration(configs, controller, args.motion_config, target_speed=args.target_speed)
         return latency_benchmark(configs, controller, args.samples)
     except KeyboardInterrupt:
         print("\nSTOPPED: no future commands will be sent. Disconnect servo power physically if unsafe.", file=sys.stderr)

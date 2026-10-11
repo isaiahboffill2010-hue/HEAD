@@ -27,16 +27,23 @@ class MotionSettings:
     hard_software_speed_cap_dps: float = 60.0
     acceleration_dps2: float = 240.0
     update_interval_s: float = 0.02
+    # Legacy field is retained as the verified maximum for existing files.
     verified_practical_speed_dps: float | None = None
+    maximum_verified_speed_dps: float | None = None
+    selected_operating_speed_dps: float | None = None
+
+    def maximum_speed(self) -> float | None:
+        return self.maximum_verified_speed_dps or self.verified_practical_speed_dps
 
     def speed(self, requested: float | None = None) -> float:
         # Once hardware has been supervised and accepted, normal speech should
         # actually use that result.  Before calibration, retain the cautious
         # fallback rather than guessing what a particular linkage can handle.
-        value = (self.verified_practical_speed_dps or self.conservative_speed_dps) if requested is None else requested
+        value = (self.selected_operating_speed_dps or self.maximum_speed() or self.conservative_speed_dps) if requested is None else requested
         if not 0 < value <= self.hard_software_speed_cap_dps:
             raise ValueError(f"speed must be > 0 and <= {self.hard_software_speed_cap_dps:g} deg/s")
-        if self.verified_practical_speed_dps is not None and value > self.verified_practical_speed_dps:
+        maximum = self.maximum_speed()
+        if maximum is not None and value > maximum:
             raise ValueError("speed exceeds manually verified practical speed")
         return value
 
@@ -46,6 +53,8 @@ def load_motion_settings(path: Path = DEFAULT_SETTINGS) -> MotionSettings:
         data = json.loads(path.read_text(encoding="utf-8"))
         settings = MotionSettings(**data)
         settings.speed()
+        if settings.maximum_speed() is not None:
+            settings.speed(settings.maximum_speed())
         if settings.acceleration_dps2 <= 0 or settings.update_interval_s <= 0:
             raise ValueError("acceleration and update interval must be positive")
         return settings
