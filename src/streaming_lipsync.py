@@ -44,13 +44,15 @@ class MouthTuning:
     max_openness: float = 0.72
     smoothing: float = 0.0
     command_deadband_deg: float = 0.5
+    final_speech_floor_ratio: float = 0.02
 
     @classmethod
     def from_environment(cls) -> "MouthTuning":
         value = cls(float(os.getenv("HEAD_MOUTH_SENSITIVITY", "1.0")),
                     float(os.getenv("HEAD_MOUTH_MAX_OPENNESS", "0.72")),
                     float(os.getenv("HEAD_MOUTH_SMOOTHING", "0")),
-                    float(os.getenv("HEAD_MOUTH_COMMAND_DEADBAND_DEG", "0.5")))
+                    float(os.getenv("HEAD_MOUTH_COMMAND_DEADBAND_DEG", "0.5")),
+                    float(os.getenv("HEAD_MOUTH_FINAL_SPEECH_FLOOR_RATIO", "0.02")))
         if not .25 <= value.sensitivity <= 4:
             raise ValueError("HEAD_MOUTH_SENSITIVITY must be between 0.25 and 4")
         if not .05 <= value.max_openness <= 1:
@@ -59,6 +61,8 @@ class MouthTuning:
             raise ValueError("HEAD_MOUTH_SMOOTHING must be between 0 and 0.95")
         if not .1 <= value.command_deadband_deg <= 2:
             raise ValueError("HEAD_MOUTH_COMMAND_DEADBAND_DEG must be between 0.1 and 2")
+        if not .005 <= value.final_speech_floor_ratio <= .07:
+            raise ValueError("HEAD_MOUTH_FINAL_SPEECH_FLOOR_RATIO must be between 0.005 and 0.07")
         return value
 
 
@@ -188,7 +192,7 @@ class StreamingLipSynchronizer:
                 self.diagnostics.dropped_frames = self.dropped_chunks
 
     def _run(self) -> None:
-        peak = 1.0
+        peak = noise_floor = 1.0; recent_speech_frames = 0
         speed_fraction = self.settings.speed() / self.max_jaw_travel_deg
         pending = None
         end_of_stream = False
@@ -225,8 +229,17 @@ class StreamingLipSynchronizer:
             for frame, frame_time, frame_due in batch:
                 began = self.clock(); rms = audioop.rms(frame, 2) if frame else 0
                 peak = max(float(rms), peak * 0.995); threshold = peak * (0.07 / self.tuning.sensitivity)
-                raw_target = 0.0 if rms < threshold else min(
+                base_speech = rms >= threshold
+                if not base_speech:
+                    noise_floor = noise_floor * .98 + float(rms) * .02
+                # A quiet final phoneme may be far below an earlier loud peak.
+                # Only relax the threshold while speech has just been active,
+                # and never below a learned PCM-silence floor.
+                rescue_threshold = max(noise_floor * 3.0, peak * self.tuning.final_speech_floor_ratio)
+                speech = base_speech or (recent_speech_frames > 0 and rms >= rescue_threshold)
+                raw_target = 0.0 if not speech else min(
                     self.tuning.max_openness, (rms / peak) ** 0.5 * self.tuning.max_openness)
+                recent_speech_frames = 10 if speech else max(0, recent_speech_frames - 1)
                 target = self._smoothed_target * self.tuning.smoothing + raw_target * (1 - self.tuning.smoothing)
                 self._smoothed_target = target
                 if target > 0:

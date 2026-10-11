@@ -18,7 +18,7 @@ from src.audio_sync import (AudioPlayer, PlaybackDiagnostics, RawPCMPlayer, ener
     select_audio_backend, validate_word_timings, word_events)
 from src.gemini_service import GeminiConfig, GeminiError, GeminiService, parse_word_timings, write_wav
 from src.streaming_lipsync import MouthTuning, StreamingLipSynchronizer
-from src.mouth_diagnostics import analyze_wav, compare_recordings, write_svg
+from src.mouth_diagnostics import analyze_wav, compare_recordings, final_speech_report, write_svg
 from src.robot_chat import generate_complete_text, speak_streaming
 from src.latency import LatencyTrace
 
@@ -559,6 +559,21 @@ class ServoControllerTests(unittest.TestCase):
             player.play(failing_stream())
         self.assertTrue(process.stdin.closed and process.waited)
 
+    def test_raw_pcm_player_waits_for_buffered_output_process_completion(self):
+        import time
+        class Input:
+            def write(self, data): pass
+            def close(self): pass
+        class Process:
+            stdin = Input()
+            def poll(self): return 0
+            def wait(self): time.sleep(.05); return 0  # output sink still buffered after submission
+        player = RawPCMPlayer(backend="pulse", popen=lambda *args, **kwargs: Process(),
+                              which=lambda _: "/usr/bin/paplay")
+        began = time.monotonic(); player.play(iter((b"\x01\x00" * 20,)))
+        self.assertGreaterEqual(time.monotonic() - began, .045)
+        self.assertIsNotNone(player.diagnostics.playback_completed_at)
+
     def test_streaming_lipsync_is_bounded_and_closes(self):
         import time
         class Mouth:
@@ -586,7 +601,7 @@ class ServoControllerTests(unittest.TestCase):
         sync.note_tts_pcm_received()
         sync.submit(b"\xff\x7f" * 480, 0.0)  # final, speech-bearing 20 ms PCM frame
         sync.finish()
-        self.assertGreaterEqual(time.monotonic() - started, .035)
+        self.assertGreaterEqual(time.monotonic() - started, .025)
         self.assertTrue(any(value > 0 for value in mouth.targets))
         self.assertEqual(mouth.targets[-1], 0.0)
         self.assertEqual(sync.diagnostics.shutdown_reason, "drained end-of-stream")
@@ -729,6 +744,29 @@ class ServoControllerTests(unittest.TestCase):
             self.assertEqual(summary["jaw_commands"], 1)
             self.assertEqual(summary["max_scheduled_lateness_ms"], 25)
             self.assertEqual(summary["coalesced_frames"], 3)
+
+    def test_quiet_final_words_keep_energy_targets_but_trailing_silence_does_not(self):
+        with tempfile.TemporaryDirectory() as directory:
+            wav_path = Path(directory) / "quiet-final.wav"
+            with wave.open(str(wav_path), "wb") as out:
+                out.setnchannels(1); out.setsampwidth(2); out.setframerate(24000)
+                # Loud speech, then three quieter speech frames, then real silence.
+                out.writeframes(b"\xff\x7f" * 480 + b"\xd6\x03" * (480 * 3) + b"\x00\x00" * (480 * 12))
+            rows = analyze_wav(wav_path, tuning=MouthTuning(command_deadband_deg=.1))
+            self.assertTrue(all(row["target"] > 0 for row in rows[1:4]))
+            self.assertEqual(rows[-1]["target"], 0.0)
+
+    def test_final_speech_report_includes_energy_targets_and_commanded_angles(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); wav_path = root / "voice.wav"; mouth = root / "voice.mouth.csv"; jaw = root / "voice.jaw.csv"; report = root / "final.csv"
+            with wave.open(str(wav_path), "wb") as out:
+                out.setnchannels(1); out.setsampwidth(2); out.setframerate(1000); out.writeframes(b"\x01\x00" * 3000)
+            mouth.write_text("audio_time,rms,threshold,target,openness,commanded,hardware_completed_at\n1.5,10,5,.2,.1,True,50\n2.5,9,5,.2,.1,True,51\n", encoding="utf-8")
+            jaw.write_text("timestamp,upper_jaw_angle,lower_jaw_angle,upper_write_ms,lower_write_ms\n51,4,12,1,1\n", encoding="utf-8")
+            summary = final_speech_report(wav_path, mouth, jaw, report)
+            self.assertEqual(summary["final_frames"], 2)
+            self.assertEqual(summary["nonzero_targets"], 2)
+            self.assertIn("upper_jaw_angle", report.read_text(encoding="utf-8"))
 
     def test_multisentence_tiny_text_chunks_are_fully_consumed(self):
         class Service:

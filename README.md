@@ -171,6 +171,8 @@ python3 -m src.mouth_diagnostics debug_audio/head-YYYYMMDD-HHMMSS.wav \
   --jaw-csv debug_audio/head-YYYYMMDD-HHMMSS.jaw-commands.csv
 ```
 
+That command also writes `*.final-speech.csv` for the final two seconds: PCM RMS/threshold, generated target and openness, scheduling/hardware timestamps, and nearest commanded P8/P10 angles. The angles are issued commands, never shaft-position feedback. Use its `energy_frames`, `nonzero_targets`, and `hardware_commands` counts to distinguish quiet-word detection from command dispatch. A nonzero command record does not prove Bluetooth acoustic timing; `paplay` does not expose physical speaker playback progress.
+
 If hardware writes are slow, HEAD analyzes all expired PCM frames but emits only the newest valid rate-limited jaw target. It never replays a stale servo-command backlog after the related audio has passed.
 
 To isolate Robot HAT application-call timing from Gemini, TTS, PulseAudio, and Bluetooth, run the supervised jaw-only benchmark. It requires the same known-powered references and exact confirmation, alternates only 0%/10% openness inside saved endpoints at the existing verified/conservative speed, leaves both jaws closed, and does not write configuration files. It reports median, p95, p99, and maximum total/P8/P10 software-call durations; those are not shaft-position measurements.
