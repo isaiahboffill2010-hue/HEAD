@@ -106,6 +106,8 @@ class PlaybackDiagnostics:
     last_pcm_submitted_at: float | None = None
     playback_started_at: float | None = None
     playback_completed_at: float | None = None
+    max_pcm_ahead_ms: float = 0.0
+    pacing_wait_ms: float = 0.0
 
 def select_audio_backend(requested: str | None = None, which: Callable[[str], str | None] = shutil.which) -> str:
     """Prefer the desktop user's PipeWire/PulseAudio default sink."""
@@ -165,13 +167,16 @@ class RawPCMPlayer:
                  latency_ms: float | None = None, popen=subprocess.Popen,
                  clock: Callable[[], float] = time.monotonic,
                  which: Callable[[str], str | None] = shutil.which,
-                 queue_chunks: int = 6) -> None:
+                 queue_chunks: int = 6, max_ahead_ms: float | None = None) -> None:
         self.backend = select_audio_backend(backend, which)
         self.sample_rate, self._popen, self._clock = sample_rate, popen, clock
         self.latency_ms = float(os.getenv("HEAD_AUDIO_LATENCY_MS", "0")) if latency_ms is None else latency_ms
         if self.latency_ms < 0:
             raise RuntimeError("HEAD_AUDIO_LATENCY_MS cannot be negative")
         self.queue_chunks = max(2, queue_chunks)
+        self.max_ahead_s = (float(os.getenv("HEAD_AUDIO_MAX_AHEAD_MS", "250")) if max_ahead_ms is None else max_ahead_ms) / 1000
+        if not .02 <= self.max_ahead_s <= 2:
+            raise RuntimeError("HEAD_AUDIO_MAX_AHEAD_MS must be between 20 and 2000")
         self.process = None
         self.cancelled = threading.Event()
         self.diagnostics = PlaybackDiagnostics()
@@ -215,6 +220,7 @@ class RawPCMPlayer:
         producer = threading.Thread(target=produce, name="despina-stream", daemon=True)
         producer.start()
         submitted = 0
+        first_submit_at = None
         consumer_error = None
         try:
             while not self.cancelled.is_set():
@@ -224,13 +230,29 @@ class RawPCMPlayer:
                 data = item[0] if isinstance(item, tuple) else item
                 if not data:
                     continue
-                self.process.stdin.write(data)
-                self.diagnostics.last_pcm_submitted_at = self._clock()
-                if submitted == 0 and on_first_submit:
-                    on_first_submit()
-                if on_chunk:
-                    on_chunk(data, submitted / (self.sample_rate * 2))
-                submitted += len(data)
+                # Keep paplay's input lead bounded. The first frame is written
+                # immediately; later frames are paced, so a fast TTS producer
+                # cannot make the final words remain buffered after the mouth
+                # sample timeline has ended.
+                frame_bytes = self.sample_rate * 2 // 50
+                for offset in range(0, len(data), frame_bytes):
+                    frame = data[offset:offset + frame_bytes]
+                    if first_submit_at is not None:
+                        ahead = (submitted + len(frame)) / (self.sample_rate * 2) - (self._clock() - first_submit_at)
+                        self.diagnostics.max_pcm_ahead_ms = max(self.diagnostics.max_pcm_ahead_ms, ahead * 1000)
+                        if ahead > self.max_ahead_s:
+                            began_wait = self._clock()
+                            if self.cancelled.wait(ahead - self.max_ahead_s): break
+                            self.diagnostics.pacing_wait_ms += (self._clock() - began_wait) * 1000
+                    self.process.stdin.write(frame)
+                    now = self._clock(); self.diagnostics.last_pcm_submitted_at = now
+                    if first_submit_at is None:
+                        first_submit_at = now
+                    if submitted == 0 and on_first_submit:
+                        on_first_submit()
+                    if on_chunk:
+                        on_chunk(frame, submitted / (self.sample_rate * 2))
+                    submitted += len(frame)
                 self.diagnostics.chunks += 1
         except BaseException as exc:
             consumer_error = exc

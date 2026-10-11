@@ -41,6 +41,7 @@ def _print_diagnostics(text, segments, diagnostics, *, mode, audio_path=None, al
     print(f"  mode: {mode}\n  full response: {text!r}\n  TTS segments ({len(segments)}): {segments!r}")
     print(f"  audio chunks: {diagnostics.chunks}\n  submitted samples: {diagnostics.samples_submitted}")
     print(f"  played samples: {diagnostics.samples_played}\n  submitted duration: {diagnostics.duration_submitted_s:.3f} s")
+    print(f"  maximum PCM output lead: {diagnostics.max_pcm_ahead_ms:.1f} ms\n  PCM pacing wait: {diagnostics.pacing_wait_ms:.1f} ms")
     print(f"  playback completed normally: {diagnostics.completed_normally}\n  playback return code: {diagnostics.return_code}")
     print(f"  failed producer: {diagnostics.producer_error or 'none'}\n  dropped/failed TTS segments: {dropped_segments}")
     print(f"  dropped mouth-analysis frames: {diagnostics.dropped_chunks}")
@@ -62,6 +63,7 @@ def _print_diagnostics(text, segments, diagnostics, *, mode, audio_path=None, al
         print(f"  coalesced stale frames: {detail.stale_frames_coalesced}")
         print(f"  late hardware commands: {detail.late_hardware_commands}; max lateness: {detail.max_command_lateness_ms:.1f} ms")
         print(f"  max jaw-command execution duration: {detail.max_command_duration_ms:.1f} ms")
+        print("  final-word diagnosis: " + lip.final_speech_summary())
     if alignment: print(f"  mouth alignment: {alignment}")
     if audio_path: print(f"  preserved audio: {audio_path}")
 

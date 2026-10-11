@@ -311,6 +311,25 @@ class StreamingLipSynchronizer:
             self.diagnostics.speech_frames, self.diagnostics.quiet_frames,
             self.diagnostics.commanded_frames, self.diagnostics.stationary_commands_suppressed)
 
+    def final_speech_summary(self) -> str:
+        """Evidence-based, short diagnosis for the last two seconds of PCM."""
+        end = self.diagnostics.final_pcm_audio_end_s or 0.0
+        rows = [row for row in self.motion_records if float(row["audio_time"]) >= max(0.0, end - 2)]
+        energy = [row for row in rows if float(row["rms"]) >= float(row["threshold"])]
+        targets = [row for row in rows if float(row["target"]) > 0]
+        completed = [row for row in rows if float(row.get("hardware_completed_at", 0)) > 0]
+        late = max([float(row.get("hardware_lateness_ms", 0)) for row in rows] or [0])
+        prefix = f"final 2 s: energy={len(energy)}, targets={len(targets)}, completed_commands={len(completed)}, max_late={late:.0f} ms. "
+        if not energy:
+            return prefix + "No PCM energy above the speech threshold; mouth correctly avoids animating detected silence."
+        if not targets:
+            return prefix + "Energy was present but no target was generated; final-word energy detection is the likely cause."
+        if not completed:
+            return prefix + "Targets were generated but no jaw call completed; dispatcher/hardware scheduling is the likely cause."
+        if late > self.settings.update_interval_s * 1000 * 3:
+            return prefix + "Jaw calls completed late; scheduling/backlog is still affecting final-word motion."
+        return prefix + "Targets and jaw calls reached the final PCM frames; any remaining audible tail is unmeasured output buffering."
+
     def stop(self, close: bool = True) -> None:
         """Cancel immediately (interrupt/error path); no queued command is retained."""
         self.cancelled.set()

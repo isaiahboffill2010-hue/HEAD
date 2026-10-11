@@ -574,6 +574,25 @@ class ServoControllerTests(unittest.TestCase):
         self.assertGreaterEqual(time.monotonic() - began, .045)
         self.assertIsNotNone(player.diagnostics.playback_completed_at)
 
+    def test_raw_pcm_player_bounds_fast_pcm_lead_without_delaying_first_frame(self):
+        import time
+        class Input:
+            def __init__(self): self.writes = 0
+            def write(self, data): self.writes += 1
+            def close(self): pass
+        class Process:
+            def __init__(self): self.stdin = Input()
+            def poll(self): return 0
+            def wait(self): return 0
+        process = Process(); first = []
+        player = RawPCMPlayer(backend="pulse", popen=lambda *args, **kwargs: process,
+                              which=lambda _: "/usr/bin/paplay", max_ahead_ms=20)
+        began = time.monotonic()
+        player.play(iter((b"\x01\x00" * (240 * 10),)), on_first_submit=lambda: first.append(time.monotonic()))
+        self.assertLess(first[0] - began, .03)
+        self.assertGreater(player.diagnostics.pacing_wait_ms, 50)
+        self.assertGreater(process.stdin.writes, 1)
+
     def test_streaming_lipsync_is_bounded_and_closes(self):
         import time
         class Mouth:
