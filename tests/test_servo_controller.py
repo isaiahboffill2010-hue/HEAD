@@ -14,8 +14,9 @@ from src.mouth_animation import MouthAnimationEngine
 from src.talking_mouth import HELLO_SEQUENCE, talking_test
 from src.adaptive_lipsync import (AdaptiveLipSynchronizer, MotionSettings,
     calibrated_max_jaw_travel, load_motion_settings)
-from src.audio_sync import AudioPlayer, energy_events, select_audio_backend, word_events
+from src.audio_sync import AudioPlayer, RawPCMPlayer, energy_events, select_audio_backend, word_events
 from src.gemini_service import GeminiConfig, GeminiService, parse_word_timings, write_wav
+from src.streaming_lipsync import StreamingLipSynchronizer
 
 
 class QuietMock(MockBackend):
@@ -381,6 +382,10 @@ class ServoControllerTests(unittest.TestCase):
             def generate_content(self, **kwargs):
                 self.kwargs = kwargs
                 return type("Response", (), {"text": "Hello from HEAD."})()
+            def generate_content_stream(self, **kwargs):
+                self.kwargs = kwargs
+                return iter((type("Response", (), {"text": "Hello "})(),
+                             type("Response", (), {"text": "from HEAD."})()))
         class Interactions:
             def create(self, **kwargs):
                 self.kwargs = kwargs
@@ -394,6 +399,86 @@ class ServoControllerTests(unittest.TestCase):
             path = service.synthesize("Hello", Path(directory) / "voice.wav")
             self.assertEqual(path.read_bytes(), b"RIFFtest")
         self.assertEqual(client.interactions.kwargs["generation_config"]["speech_config"][0]["voice"], "Despina")
+
+    def test_streaming_gemini_reports_chunks_and_bounds_history(self):
+        class Models:
+            def generate_content_stream(self, **kwargs):
+                return iter((type("R", (), {"text": "Short "})(), type("R", (), {"text": "answer."})()))
+        client = type("Client", (), {"models": Models()})()
+        service = GeminiService(GeminiConfig("key", "chat", "tts", "Despina", "align", "0", 1), client)
+        first = []
+        self.assertEqual("".join(service.reply_stream("Hi", lambda: first.append(True))), "Short answer.")
+        self.assertEqual(first, [True])
+        self.assertEqual(len(service.history), 2)
+
+    def test_streaming_despina_decodes_raw_pcm_chunks(self):
+        import base64
+        audio = base64.b64encode(b"\x01\x00" * 20).decode()
+        delta = type("Delta", (), {"type": "audio", "data": audio})()
+        event = type("Event", (), {"event_type": "step.delta", "delta": delta})()
+        class Interactions:
+            def create(self, **kwargs):
+                self.kwargs = kwargs
+                return iter((event,))
+        client = type("Client", (), {"interactions": Interactions()})()
+        service = GeminiService(GeminiConfig("key", "chat", "tts", "Despina", "align"), client)
+        chunks = list(service.stream_speech("hello"))
+        self.assertEqual(chunks[0][0], b"\x01\x00" * 20)
+        self.assertTrue(client.interactions.kwargs["stream"])
+        self.assertEqual(client.interactions.kwargs["response_format"]["sample_rate"], 24000)
+
+    def test_raw_pcm_player_buffers_submits_and_waits(self):
+        class Input:
+            def __init__(self): self.data = bytearray(); self.closed = False
+            def write(self, data): self.data.extend(data)
+            def close(self): self.closed = True
+        class Process:
+            def __init__(self): self.stdin = Input(); self.waited = False
+            def wait(self): self.waited = True; return 0
+            def poll(self): return 0
+        process = Process(); calls = []
+        player = RawPCMPlayer(backend="pulse", popen=lambda command, **kwargs: calls.append(command) or process,
+                              which=lambda _: "/usr/bin/paplay", queue_chunks=2)
+        submitted = []
+        self.assertEqual(player.play(iter((b"aa", b"bb")), on_first_submit=lambda: submitted.append(True)), 0)
+        self.assertEqual(process.stdin.data, b"aabb")
+        self.assertEqual(submitted, [True])
+        self.assertTrue(process.stdin.closed and process.waited)
+
+    def test_raw_pcm_player_propagates_slow_stream_failure_after_cleanup(self):
+        class Input:
+            def __init__(self): self.closed = False
+            def write(self, data): pass
+            def close(self): self.closed = True
+        class Process:
+            def __init__(self): self.stdin = Input(); self.waited = False
+            def wait(self): self.waited = True; return 0
+            def poll(self): return 0
+        process = Process()
+        def failing_stream():
+            yield b"first"
+            raise RuntimeError("network stalled")
+        player = RawPCMPlayer(backend="pulse", popen=lambda *args, **kwargs: process,
+                              which=lambda _: "/usr/bin/paplay", queue_chunks=2)
+        with self.assertRaisesRegex(RuntimeError, "network stalled"):
+            player.play(failing_stream())
+        self.assertTrue(process.stdin.closed and process.waited)
+
+    def test_streaming_lipsync_is_bounded_and_closes(self):
+        import time
+        class Mouth:
+            def __init__(self): self.targets = []
+            def set_openness_step(self, value): self.targets.append(value)
+        mouth = Mouth()
+        sync = StreamingLipSynchronizer(mouth, 20, MotionSettings(8, 60, 240, .02, 25))
+        sync.start()
+        for _ in range(20):
+            sync.submit(b"\xff\x7f" * 240, 0)
+        time.sleep(.08)
+        sync.stop()
+        self.assertTrue(mouth.targets)
+        self.assertTrue(all(0 <= value <= 1 for value in mouth.targets))
+        self.assertEqual(mouth.targets[-1], 0.0)
 
     def test_word_timing_parser_and_wav_energy_fallback(self):
         self.assertEqual(parse_word_timings('[{"word":"hi","start":0,"end":0.2}]'), [{"start": 0.0, "end": 0.2}])

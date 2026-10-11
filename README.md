@@ -142,3 +142,51 @@ HEAD_AUDIO_BACKEND=pulse python3 -m src.robot_chat --voice-test
 ```
 
 `paplay` does not expose the Bluetooth speaker's actual acoustic latency. Mouth synchronization uses the audio-process playback clock and can apply an explicit estimate with `HEAD_AUDIO_LATENCY_MS` (for example, `HEAD_AUDIO_LATENCY_MS=180`). A positive value delays mouth motion to match sound that emerges later from the speaker. Measure and tune this only on your own speaker; Bluetooth latency may vary and can limit lip-sync precision.
+
+## Low-latency streamed conversation
+
+The default chat path streams Gemini text, requests Despina as soon as the first complete sentence is available, and streams headerless 24 kHz mono signed-16-bit PCM directly into `paplay` or `aplay`. It does not upload speech for alignment before playback. A bounded four-chunk worker derives lightweight energy targets from PCM already submitted to audio; stale mouth-analysis chunks are dropped instead of delaying speech. The existing WAV, transcription, and `AdaptiveLipSynchronizer` path remains available with `--complete-audio` and is also used if streaming TTS is unavailable.
+
+Every response prints millisecond timings for Gemini's first token and completion, Despina's first audio chunk, PCM preparation, incremental alignment, player startup, first submitted audio, and estimated first audible sound. The audible value adds `HEAD_AUDIO_LATENCY_MS`; it is an estimate because PulseAudio/PipeWire does not expose the Bluetooth acoustic delay.
+
+Recommended Raspberry Pi deployment:
+
+```bash
+cd ~/HEAD
+git pull --ff-only origin main
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
+python3 -m pip install -r requirements.txt
+sudo apt-get install -y pulseaudio-utils alsa-utils
+python3 -m unittest discover -s tests -v
+python3 -m compileall -q src tests
+```
+
+Keep the existing `.env.local`, `config/servos.json`, and verified value in `config/mouth_motion.json`. For a low-latency configuration, set these in `.env.local` only if the startup model check confirms that your API key can access them:
+
+```dotenv
+GEMINI_CHAT_MODEL=gemini-2.5-flash-lite
+GEMINI_TTS_MODEL=gemini-3.8-flash-lite-tts
+GEMINI_TTS_VOICE=Despina
+GEMINI_THINKING=0
+GEMINI_MAX_HISTORY_TURNS=4
+HEAD_AUDIO_BACKEND=pulse
+HEAD_AUDIO_LATENCY_MS=180
+```
+
+Test voice-only streaming first, then the servos:
+
+```bash
+python3 -m src.robot_chat --voice-only
+python3 -m src.robot_chat --mouth-test
+python3 -m src.robot_chat
+```
+
+To compare real API availability latency for identical prompts, run:
+
+```bash
+python3 -m src.benchmark_latency --output latency-benchmark.json
+```
+
+This benchmark makes billable real requests. It reports complete-response and streaming measurements without claiming Bluetooth acoustic timing. Use `python3 -m src.robot_chat --complete-audio` to test the original complete-WAV path directly.

@@ -4,6 +4,8 @@ import audioop
 import os
 import shutil
 import subprocess
+import queue
+import threading
 import time
 import wave
 from pathlib import Path
@@ -72,3 +74,73 @@ class AudioPlayer:
 
 # Backward-compatible name used by older callers.
 Aplay = AudioPlayer
+
+
+class RawPCMPlayer:
+    """Bounded, backpressured raw-PCM playback for streamed TTS."""
+    def __init__(self, backend: str | None = None, sample_rate: int = 24000,
+                 latency_ms: float | None = None, popen=subprocess.Popen,
+                 clock: Callable[[], float] = time.monotonic,
+                 which: Callable[[str], str | None] = shutil.which,
+                 queue_chunks: int = 6) -> None:
+        self.backend = select_audio_backend(backend, which)
+        self.sample_rate, self._popen, self._clock = sample_rate, popen, clock
+        self.latency_ms = float(os.getenv("HEAD_AUDIO_LATENCY_MS", "0")) if latency_ms is None else latency_ms
+        if self.latency_ms < 0:
+            raise RuntimeError("HEAD_AUDIO_LATENCY_MS cannot be negative")
+        self.queue_chunks = max(2, queue_chunks)
+        self.process = None
+        self.cancelled = threading.Event()
+
+    def _command(self) -> list[str]:
+        if self.backend == "pulse":
+            return ["paplay", "--raw", f"--rate={self.sample_rate}", "--channels=1", "--format=s16le"]
+        return ["aplay", "-q", "-t", "raw", "-f", "S16_LE", "-r", str(self.sample_rate), "-c", "1"]
+
+    def play(self, chunks, *, on_ready=None, on_first_submit=None, on_chunk=None) -> int:
+        pcm_queue: queue.Queue = queue.Queue(maxsize=self.queue_chunks)
+        sentinel = object()
+        errors: list[BaseException] = []
+
+        def produce() -> None:
+            try:
+                for item in chunks:
+                    if self.cancelled.is_set():
+                        break
+                    pcm_queue.put(item)
+            except BaseException as exc:
+                errors.append(exc)
+            finally:
+                pcm_queue.put(sentinel)
+
+        self.process = self._popen(self._command(), stdin=subprocess.PIPE, bufsize=0)
+        if on_ready:
+            on_ready()
+        producer = threading.Thread(target=produce, name="despina-stream", daemon=True)
+        producer.start()
+        submitted = 0
+        while not self.cancelled.is_set():
+            item = pcm_queue.get()
+            if item is sentinel:
+                break
+            data = item[0] if isinstance(item, tuple) else item
+            if not data:
+                continue
+            self.process.stdin.write(data)
+            if submitted == 0 and on_first_submit:
+                on_first_submit()
+            if on_chunk:
+                on_chunk(data, submitted / (self.sample_rate * 2))
+            submitted += len(data)
+        if self.process.stdin:
+            self.process.stdin.close()
+        producer.join(timeout=2)
+        code = self.process.wait()
+        if errors:
+            raise errors[0]
+        return code
+
+    def stop(self) -> None:
+        self.cancelled.set()
+        if self.process and self.process.poll() is None:
+            self.process.terminate()
