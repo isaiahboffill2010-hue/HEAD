@@ -27,7 +27,9 @@ class Microphone:
         self._stderr_thread: threading.Thread | None = None
         self.frame_bytes = rate * 2 // 50  # 20 ms, mono S16_LE
         self.threshold = max(80, int(os.getenv("HEAD_MIC_VAD_RMS", "450")))
-        self.silence_s = min(.6, max(.45, float(os.getenv("HEAD_MIC_SILENCE_MS", "550")) / 1000))
+        # Ziggy's hands-free turns need a little more room between final words
+        # than the original push-to-talk path.  Pre-roll remains 300 ms.
+        self.silence_s = min(1.2, max(.45, float(os.getenv("HEAD_MIC_SILENCE_MS", "1000")) / 1000))
         self.recovery_attempts = min(3, max(0, int(os.getenv("HEAD_MIC_RECOVERY_ATTEMPTS", "2"))))
 
     @staticmethod

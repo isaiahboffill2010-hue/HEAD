@@ -3,6 +3,7 @@ import tempfile
 import unittest
 import wave
 from pathlib import Path
+from unittest.mock import patch
 
 from src.servo_controller import (ConfigurationError, LimitError, MockBackend,
     NotCalibratedError, PositionUnknownError, ServoConfig, ServoController,
@@ -19,7 +20,9 @@ from src.audio_sync import (AudioPlayer, PlaybackDiagnostics, RawPCMPlayer, ener
 from src.gemini_service import GeminiConfig, GeminiError, GeminiService, parse_word_timings, write_wav
 from src.streaming_lipsync import MouthTuning, StreamingLipSynchronizer
 from src.mouth_diagnostics import analyze_wav, compare_recordings, final_speech_report, write_svg
-from src.robot_chat import generate_complete_text, speak_streaming
+from src.robot_chat import (establish_mouth, generate_complete_text, speak_streaming, wake_command,
+    ziggy_silence_seconds)
+import src.robot_chat as robot_chat
 from src.latency import LatencyTrace
 from src.microphone import Microphone
 
@@ -893,6 +896,37 @@ class ServoControllerTests(unittest.TestCase):
         utterance = mic.listen(max_s=3)
         self.assertIsNotNone(utterance)
         self.assertGreater(utterance.duration_s, .5)
+
+    def test_ziggy_wake_word_extracts_request(self):
+        self.assertEqual(wake_command("Hey Ziggy, tell me a joke."), "tell me a joke.")
+        self.assertEqual(wake_command("ZIGGY!"), "")
+        self.assertIsNone(wake_command("please tell me a joke"))
+
+    def test_ziggy_uses_one_second_silence_even_with_legacy_mic_setting(self):
+        with patch.dict("os.environ", {"HEAD_MIC_SILENCE_MS": "550"}, clear=False):
+            self.assertEqual(ziggy_silence_seconds(), 1.0)
+
+    def test_hands_free_startup_never_constructs_or_prompts_for_jaws(self):
+        service = object()
+        with patch.object(robot_chat.GeminiConfig, "from_environment", return_value=object()), \
+             patch.object(robot_chat, "GeminiService", return_value=service), \
+             patch.object(robot_chat, "ServoController") as controller, \
+             patch.object(robot_chat, "run_listen_session", return_value=0) as listening:
+            self.assertEqual(robot_chat.main(["--listen", "--streaming", "--skip-model-check"]), 0)
+        controller.assert_not_called()
+        self.assertIsNone(listening.call_args.kwargs["mouth"])
+
+    def test_supervised_jaw_reference_adoption_sends_no_servo_command(self):
+        configs = {
+            "upper_jaw": ServoConfig("P8", 1, 1, -5, 21, 21, 1),
+            "lower_jaw": ServoConfig("P10", 15, 1, 0, 20, 0, -1),
+        }
+        backend = QuietMock(); controller = ServoController(configs, backend, sleep=lambda _: None)
+        replies = iter(["1", "POWERED", "15", "POWERED"])
+        self.assertTrue(establish_mouth(configs, controller, input_func=lambda _: next(replies)))
+        self.assertEqual(backend.commands, [])
+        self.assertEqual(controller.position("upper_jaw"), 1)
+        self.assertEqual(controller.position("lower_jaw"), 15)
 
     def test_microphone_uses_one_continuous_raw_process_for_multiple_turns(self):
         calls = []

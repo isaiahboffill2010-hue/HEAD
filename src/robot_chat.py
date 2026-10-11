@@ -1,6 +1,6 @@
 """Reliable and streaming Gemini + Despina terminal conversation."""
 from __future__ import annotations
-import argparse, csv, tempfile, time, wave
+import argparse, csv, os, re, tempfile, time, wave
 from pathlib import Path
 
 from .adaptive_lipsync import AdaptiveLipSynchronizer, calibrated_max_jaw_travel, load_motion_settings
@@ -13,6 +13,19 @@ from .mouth_calibration import _known_reference
 from .servo_controller import ConfigurationError, RobotHatBackend, ServoController, load_config
 from .streaming_lipsync import StreamingLipSynchronizer
 from .microphone import Microphone
+
+
+WAKE_WORD = "ziggy"
+WAKE_WORD_PATTERN = re.compile(r"\bziggy\b", re.IGNORECASE)
+
+
+def ziggy_silence_seconds() -> float:
+    """Separate wake-word turn timing from legacy push-to-talk VAD tuning."""
+    try:
+        milliseconds = float(os.getenv("HEAD_ZIGGY_SILENCE_MS", "1000"))
+    except ValueError:
+        milliseconds = 1000.0
+    return min(1.2, max(.45, milliseconds / 1000))
 
 
 def establish_mouth(configs, controller, input_func=input) -> bool:
@@ -243,13 +256,23 @@ def run_session(service, *, voice_only, mode="reliable", mouth=None, configs=Non
         except RuntimeError as exc: print(f"Audio error: {exc}")
 
 
+def wake_command(transcript: str) -> str | None:
+    """Return the spoken request after Ziggy's wake word, without an ML wake model."""
+    found = WAKE_WORD_PATTERN.search(transcript)
+    if not found:
+        return None
+    return transcript[found.end():].lstrip(" ,.!?:;-\t").strip()
+
+
 def run_listen_session(service, *, mode, mouth=None, configs=None, debug_audio=False) -> int:
     """Hands-free turns. Capture remains open; it is idle while HEAD speaks."""
     microphone = Microphone()
-    print(f"HEAD ROBOT - HANDS-FREE ({mode} mode). Ctrl+C to stop. Mic: {microphone.device}")
+    microphone.silence_s = ziggy_silence_seconds()
+    print(f"Ziggy: Listening for wake word (mic: {microphone.device})")
+    print("Mouth: Ready" if mouth is not None else "Mouth: Disabled — reference required")
     try:
         while True:
-            print("Listening...")
+            print("Listening for wake word...")
             utterance = microphone.listen()
             if utterance is None:
                 print("No speech detected; listening again."); continue
@@ -262,7 +285,12 @@ def run_listen_session(service, *, mode, mouth=None, configs=None, debug_audio=F
             if not text:
                 print("No usable speech recognized; listening again."); continue
             print(f"You said: {text}")
-            answer = generate_complete_text(text, service, trace)
+            request = wake_command(text)
+            if request is None:
+                print("Ziggy: Wake word not heard; listening again."); continue
+            if not request:
+                print("Ziggy: I heard you. Please say your request after Ziggy."); continue
+            answer = generate_complete_text(request, service, trace)
             helper = speak_streaming if mode == "streaming" else speak_reliable
             helper(answer, service, mouth=mouth, configs=configs, trace=trace, debug_audio=debug_audio)
             trace.finish(float(__import__("os").getenv("HEAD_AUDIO_LATENCY_MS", "0")))
@@ -286,6 +314,8 @@ def main(argv=None):
                         help="supervised 0/100/200/300 ms jaw-only timing comparison")
     parser.add_argument("--voice-test", action="store_true")
     parser.add_argument("--listen", action="store_true", help="persistent microphone VAD -> Gemini STT -> reply loop")
+    parser.add_argument("--initialize-jaws", action="store_true",
+                        help="supervised, session-only powered-reference confirmation for P8/P10")
     parser.add_argument("--list-mics", action="store_true", help="list ALSA capture devices and exit")
     parser.add_argument("--debug-audio", action="store_true")
     parser.add_argument("--skip-model-check", action="store_true")
@@ -294,18 +324,31 @@ def main(argv=None):
         if args.list_mics:
             print(Microphone.devices()); return 0
         service = GeminiService(GeminiConfig.from_environment())
-        if not args.skip_model_check:
+        # Do not delay wake-word capture with network model probing. Requests still
+        # fail visibly if a configured model is unavailable.
+        if not args.skip_model_check and not args.listen:
             found = service.verify_models(); print("Verified models:", ", ".join(f"{k}={v}" for k, v in found.items()))
         if args.voice_test:
             speak_reliable("Hello. This is a Despina Bluetooth speaker test.", service, debug_audio=args.debug_audio); return 0
         if args.voice_only: return run_session(service, voice_only=True, mode=mode, debug_audio=args.debug_audio)
         configs = load_config(Path(__file__).resolve().parents[1] / "config" / "servos.json")
-        controller = ServoController(configs, RobotHatBackend())
-        if not establish_mouth(configs, controller): return 1
-        mouth = MouthController(controller)
+        mouth = None
+        if args.initialize_jaws:
+            controller = ServoController(configs, RobotHatBackend())
+            print("Jaw initialization is session-only: it sends no command until speech begins.")
+            if not establish_mouth(configs, controller): return 1
+            mouth = MouthController(controller)
+            print("Mouth: Ready for this continuously powered session.")
+        elif not args.listen:
+            # Interactive and test modes retain their explicit supervised setup.
+            controller = ServoController(configs, RobotHatBackend())
+            if not establish_mouth(configs, controller): return 1
+            mouth = MouthController(controller)
         if args.mouth_offset_calibration:
+            if mouth is None: raise ConfigurationError("--mouth-offset-calibration requires --initialize-jaws")
             return calibrate_mouth_offset(service, mouth, configs)
         if args.mouth_test:
+            if mouth is None: raise ConfigurationError("--mouth-test requires --initialize-jaws")
             (speak_streaming if mode == "streaming" else speak_reliable)(
                 "Hello, this is a short mouth synchronization test.", service,
                 mouth=mouth, configs=configs, debug_audio=args.debug_audio); return 0
