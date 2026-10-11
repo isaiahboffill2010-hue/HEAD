@@ -68,7 +68,8 @@ def parse_word_timings(text: str) -> list[dict[str, float]]:
     for item in raw if isinstance(raw, list) else []:
         try:
             start, end = float(item["start"]), float(item["end"])
-            if 0 <= start <= end: result.append({"start": start, "end": end})
+            if 0 <= start <= end:
+                result.append({"word": str(item.get("word", "")), "start": start, "end": end})
         except (KeyError, TypeError, ValueError): pass
     return result
 
@@ -82,6 +83,8 @@ class GeminiService:
             except ImportError as exc: raise GeminiError("Install dependencies: pip install -r requirements.txt") from exc
         self.client = client
         self.history: list[dict[str, str]] = []
+        self.last_finish_reason = "unknown"
+        self.last_alignment_error: str | None = None
 
     def _prompt(self, user_text: str) -> str:
         prompt = "You are HEAD, a friendly animatronic robot. Answer in one or two short, natural sentences.\n"
@@ -91,7 +94,7 @@ class GeminiService:
 
     def _generation_config(self) -> dict[str, Any]:
         value = self.config.thinking.strip().lower()
-        config: dict[str, Any] = {"max_output_tokens": 120}
+        config: dict[str, Any] = {"max_output_tokens": 256}
         if value in {"minimal", "low", "medium", "high"}:
             config["thinking_config"] = {"thinking_level": value}
         else:
@@ -119,6 +122,11 @@ class GeminiService:
             )
             first = True
             for response in stream:
+                candidates = getattr(response, "candidates", None) or []
+                if candidates:
+                    reason = getattr(candidates[0], "finish_reason", None)
+                    if reason is not None:
+                        self.last_finish_reason = str(getattr(reason, "name", reason))
                 text = getattr(response, "text", "") or ""
                 if not text:
                     continue
@@ -132,6 +140,8 @@ class GeminiService:
         answer = "".join(pieces).strip()
         if not answer:
             raise GeminiError("Gemini returned an empty response")
+        if "MAX_TOKENS" in self.last_finish_reason.upper():
+            raise GeminiError("Gemini stopped at the output-token limit; refusing to speak truncated text")
         self.history.extend(({"role": "user", "text": user_text}, {"role": "assistant", "text": answer}))
         self.history = self.history[-self.config.max_history_turns * 2:]
 
@@ -146,10 +156,17 @@ class GeminiService:
                 config=self._generation_config(),
             )
             text = (getattr(response, "text", "") or "").strip()
+            candidates = getattr(response, "candidates", None) or []
+            if candidates:
+                reason = getattr(candidates[0], "finish_reason", None)
+                if reason is not None:
+                    self.last_finish_reason = str(getattr(reason, "name", reason))
         except Exception as exc:
             raise GeminiError(f"Gemini conversation failed: {exc}") from exc
         if not text:
             raise GeminiError("Gemini returned an empty response")
+        if "MAX_TOKENS" in self.last_finish_reason.upper():
+            raise GeminiError("Gemini stopped at the output-token limit; refusing to speak truncated text")
         self.history.extend(({"role": "user", "text": user_text}, {"role": "assistant", "text": text}))
         self.history = self.history[-self.config.max_history_turns * 2:]
         return text
@@ -201,6 +218,7 @@ class GeminiService:
     def word_timings(self, wav_path: Path) -> list[dict[str, float]]:
         """Attempt supported transcription timing; caller must use energy fallback on failure."""
         try:
+            self.last_alignment_error = None
             uploaded = self.client.files.upload(file=str(wav_path))
             prompt = ("Return ONLY JSON list of words with seconds: "
                       '[{"word":"...","start":0.0,"end":0.2}]. Include word-level timings.')
@@ -209,5 +227,6 @@ class GeminiService:
                 {"type": "text", "text": prompt},
             ])
             return parse_word_timings(getattr(response, "output_text", ""))
-        except Exception:
+        except Exception as exc:
+            self.last_alignment_error = repr(exc)
             return []

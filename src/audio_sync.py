@@ -8,10 +8,16 @@ import queue
 import threading
 import time
 import wave
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-def energy_events(wav_path: Path, window_s: float = 0.08) -> list[dict[str, float]]:
+def wav_duration(wav_path: Path) -> float:
+    with wave.open(str(wav_path), "rb") as source:
+        return source.getnframes() / source.getframerate()
+
+
+def energy_events(wav_path: Path, window_s: float = 0.04) -> list[dict[str, float]]:
     """Audio-based fallback: speech energy opens, quiet windows close the mouth."""
     with wave.open(str(wav_path), "rb") as source:
         rate, width, channels = source.getframerate(), source.getsampwidth(), source.getnchannels()
@@ -25,15 +31,78 @@ def energy_events(wav_path: Path, window_s: float = 0.08) -> list[dict[str, floa
         openness = 0.0 if value < peak * 0.08 else min(0.7, (value / peak) ** 0.5 * 0.7)
         events.append({"time": index * window_s, "openness": openness})
     duration = len(chunks) * window_s
+    # Begin closing during the final audio window, not after playback ends.
+    events.append({"time": max(0.0, duration - window_s), "openness": 0.0})
     events.append({"time": duration, "openness": 0.0})
     return events
 
-def word_events(words: list[dict[str, float]]) -> list[dict[str, float]]:
+def word_events(words: list[dict[str, float]], duration: float | None = None,
+                speed_fraction: float | None = None) -> list[dict[str, float]]:
+    """Create syllable-like pulses bounded by each aligned word interval."""
     events = [{"time": 0.0, "openness": 0.0}]
     for word in words:
         start, end = word["start"], word["end"]
-        events.extend(({"time": start, "openness": 0.55}, {"time": end, "openness": 0.0}))
+        if end <= start or (duration is not None and end > duration + 0.05):
+            continue
+        text = str(word.get("word", ""))
+        syllables = max(1, min(4, len(__import__("re").findall(r"[aeiouy]+", text.lower()))))
+        slot = (end - start) / syllables
+        for index in range(syllables):
+            onset = start + slot * index
+            close = min(end, onset + slot * 0.78)
+            amplitude = 0.62
+            if speed_fraction is not None:
+                # A complete open/close must fit in this syllable. Short words
+                # get smaller motion instead of leaving the jaw chasing late.
+                amplitude = min(amplitude, max(0.02, speed_fraction * slot * 0.45))
+            events.extend(({"time": onset, "openness": amplitude},
+                           {"time": close, "openness": 0.12}))
+        events.append({"time": end, "openness": 0.0})
+    if duration is not None:
+        events.append({"time": duration, "openness": 0.0})
     return sorted(events, key=lambda event: event["time"])
+
+
+def validate_word_timings(words: list[dict[str, float]], duration: float) -> bool:
+    previous = 0.0
+    if not words:
+        return False
+    for word in words:
+        start, end = word["start"], word["end"]
+        if start < previous or end < start or end > duration + 0.05:
+            return False
+        previous = start
+    return True
+
+
+def limit_event_amplitudes(events: list[dict[str, float]], speed_fraction: float) -> list[dict[str, float]]:
+    """Clamp targets in both directions so openings and closings fit in time."""
+    limited = [dict(event) for event in events]
+    position = 0.0; previous = 0.0
+    for event in limited:
+        allowed = speed_fraction * max(0.0, event["time"] - previous)
+        event["openness"] = max(position - allowed, min(position + allowed, event["openness"]))
+        position, previous = event["openness"], event["time"]
+    position = limited[-1]["openness"] if limited else 0.0
+    next_time = limited[-1]["time"] if limited else 0.0
+    for event in reversed(limited[:-1]):
+        allowed = speed_fraction * max(0.0, next_time - event["time"])
+        event["openness"] = max(position - allowed, min(position + allowed, event["openness"]))
+        position, next_time = event["openness"], event["time"]
+    return limited
+
+
+@dataclass
+class PlaybackDiagnostics:
+    chunks: int = 0
+    bytes_submitted: int = 0
+    samples_submitted: int = 0
+    duration_submitted_s: float = 0.0
+    samples_played: int = 0
+    completed_normally: bool = False
+    return_code: int | None = None
+    producer_error: str | None = None
+    dropped_chunks: int = 0
 
 def select_audio_backend(requested: str | None = None, which: Callable[[str], str | None] = shutil.which) -> str:
     """Prefer the desktop user's PipeWire/PulseAudio default sink."""
@@ -62,13 +131,24 @@ class AudioPlayer:
         self.latency_s = (float(os.getenv("HEAD_AUDIO_LATENCY_MS", "0")) if latency_ms is None else latency_ms) / 1000
         if self.latency_s < 0: raise RuntimeError("HEAD_AUDIO_LATENCY_MS cannot be negative")
         self.process = self.started = None
+        self.diagnostics = PlaybackDiagnostics()
     def start(self) -> Callable[[], float]:
         command = ["paplay", str(self.wav_path)] if self.backend == "pulse" else ["aplay", str(self.wav_path)]
         self.process = self._popen(command)
         self.started = self._clock()
         return lambda: max(0.0, self._clock() - self.started - self.latency_s)
     def wait(self) -> int:
-        return self.process.wait() if self.process else 0
+        code = self.process.wait() if self.process else 0
+        self.diagnostics.return_code = code
+        self.diagnostics.completed_normally = code == 0
+        if self.wav_path.exists():
+            with wave.open(str(self.wav_path), "rb") as source:
+                samples = source.getnframes()
+            self.diagnostics.chunks = 1
+            self.diagnostics.samples_submitted = samples
+            self.diagnostics.samples_played = samples if code == 0 else 0
+            self.diagnostics.duration_submitted_s = wav_duration(self.wav_path)
+        return code
     def stop(self) -> None:
         if self.process and self.process.poll() is None: self.process.terminate()
 
@@ -91,6 +171,7 @@ class RawPCMPlayer:
         self.queue_chunks = max(2, queue_chunks)
         self.process = None
         self.cancelled = threading.Event()
+        self.diagnostics = PlaybackDiagnostics()
 
     def _command(self) -> list[str]:
         if self.backend == "pulse":
@@ -102,16 +183,27 @@ class RawPCMPlayer:
         sentinel = object()
         errors: list[BaseException] = []
 
+        def enqueue(item) -> bool:
+            while not self.cancelled.is_set():
+                try:
+                    pcm_queue.put(item, timeout=0.1)
+                    return True
+                except queue.Full:
+                    continue
+            return False
+
         def produce() -> None:
             try:
                 for item in chunks:
                     if self.cancelled.is_set():
                         break
-                    pcm_queue.put(item)
+                    if not enqueue(item):
+                        break
             except BaseException as exc:
                 errors.append(exc)
+                self.diagnostics.producer_error = repr(exc)
             finally:
-                pcm_queue.put(sentinel)
+                enqueue(sentinel)
 
         self.process = self._popen(self._command(), stdin=subprocess.PIPE, bufsize=0)
         if on_ready:
@@ -119,23 +211,40 @@ class RawPCMPlayer:
         producer = threading.Thread(target=produce, name="despina-stream", daemon=True)
         producer.start()
         submitted = 0
-        while not self.cancelled.is_set():
-            item = pcm_queue.get()
-            if item is sentinel:
-                break
-            data = item[0] if isinstance(item, tuple) else item
-            if not data:
-                continue
-            self.process.stdin.write(data)
-            if submitted == 0 and on_first_submit:
-                on_first_submit()
-            if on_chunk:
-                on_chunk(data, submitted / (self.sample_rate * 2))
-            submitted += len(data)
-        if self.process.stdin:
-            self.process.stdin.close()
-        producer.join(timeout=2)
-        code = self.process.wait()
+        consumer_error = None
+        try:
+            while not self.cancelled.is_set():
+                item = pcm_queue.get()
+                if item is sentinel:
+                    break
+                data = item[0] if isinstance(item, tuple) else item
+                if not data:
+                    continue
+                self.process.stdin.write(data)
+                if submitted == 0 and on_first_submit:
+                    on_first_submit()
+                if on_chunk:
+                    on_chunk(data, submitted / (self.sample_rate * 2))
+                submitted += len(data)
+                self.diagnostics.chunks += 1
+        except BaseException as exc:
+            consumer_error = exc
+            self.cancelled.set()
+            if self.process.poll() is None:
+                self.process.terminate()
+        finally:
+            if self.process.stdin:
+                self.process.stdin.close()
+            producer.join(timeout=2)
+            code = self.process.wait()
+        self.diagnostics.bytes_submitted = submitted
+        self.diagnostics.samples_submitted = submitted // 2
+        self.diagnostics.duration_submitted_s = submitted / (self.sample_rate * 2)
+        self.diagnostics.return_code = code
+        self.diagnostics.completed_normally = code == 0 and not errors and not self.cancelled.is_set()
+        self.diagnostics.samples_played = self.diagnostics.samples_submitted if self.diagnostics.completed_normally else 0
+        if consumer_error:
+            raise consumer_error
         if errors:
             raise errors[0]
         return code

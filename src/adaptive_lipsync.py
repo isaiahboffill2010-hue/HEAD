@@ -134,7 +134,8 @@ class AdaptiveLipSynchronizer:
         return adapted
 
     def run(self, events: Sequence[Mapping[str, float]], playback_clock: Callable[[], float],
-            speed_dps: float | None = None, start_openness: float = 0.0) -> list[TimingRecord]:
+            speed_dps: float | None = None, start_openness: float = 0.0,
+            settle_after_final: bool = True) -> list[TimingRecord]:
         """Synchronize to playback, skipping stale targets instead of chasing them late."""
         if not 0.0 <= start_openness <= 1.0:
             raise ValueError("start_openness must be between 0.0 and 1.0")
@@ -193,7 +194,8 @@ class AdaptiveLipSynchronizer:
             if abs(next_position - position) >= 0.0001:
                 self.mouth.set_openness_step(min(1.0, max(0.0, next_position)))
                 position = next_position
-            if elapsed >= final_time and (abs(target - position) < 0.0001 or elapsed >= settle_deadline):
+            if elapsed >= final_time and (not settle_after_final or abs(target - position) < 0.0001
+                                          or elapsed >= settle_deadline):
                 break
             # Keep command times on playback deadlines. Servo/I2C write time is
             # part of the interval, not extra delay added after every update.

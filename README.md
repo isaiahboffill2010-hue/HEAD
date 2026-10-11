@@ -127,7 +127,7 @@ robot_hat doctor
 python3 -m src.robot_chat --voice-only
 ```
 
-Type a short message, then `quit`. Full mouth mode (`python3 -m src.robot_chat`) requires confirming that both jaws are continuously powered, unrepositioned, and currently at their saved closed neutral positions. `--mouth-test` speaks one test phrase after the same confirmations. The pipeline first tries word timing from the configured alignment model; if unavailable, the terminal reports its audio-energy fallback. Audio starts first, and the adaptive mouth synchronizer uses that playback clock—not a fixed animation. Ctrl+C stops future motion and audio; do not assume that it removes torque, so physically disconnect servo power if binding occurs.
+Type a short message, then `quit`. Full mouth mode (`python3 -m src.robot_chat`) requires confirming that both jaws are continuously powered, unrepositioned, and currently at their saved closed neutral positions. `--mouth-test` speaks one test phrase after the same confirmations. Reliable mode obtains and validates word timing before playback; if unavailable, the terminal reports its actual-audio energy fallback. Playback and the adaptive mouth synchronizer then use one shared clock—not a fixed animation. Ctrl+C stops future motion and audio; do not assume that it removes torque, so physically disconnect servo power if binding occurs.
 
 ### Bluetooth / desktop audio output
 
@@ -143,9 +143,21 @@ HEAD_AUDIO_BACKEND=pulse python3 -m src.robot_chat --voice-test
 
 `paplay` does not expose the Bluetooth speaker's actual acoustic latency. Mouth synchronization uses the audio-process playback clock and can apply an explicit estimate with `HEAD_AUDIO_LATENCY_MS` (for example, `HEAD_AUDIO_LATENCY_MS=180`). A positive value delays mouth motion to match sound that emerges later from the speaker. Measure and tune this only on your own speaker; Bluetooth latency may vary and can limit lip-sync precision.
 
-## Low-latency streamed conversation
+## Reliable and streaming conversation modes
 
-The default chat path streams Gemini text, requests Despina as soon as the first complete sentence is available, and streams headerless 24 kHz mono signed-16-bit PCM directly into `paplay` or `aplay`. It does not upload speech for alignment before playback. A bounded four-chunk worker derives lightweight energy targets from PCM already submitted to audio; stale mouth-analysis chunks are dropped instead of delaying speech. The existing WAV, transcription, and `AdaptiveLipSynchronizer` path remains available with `--complete-audio` and is also used if streaming TTS is unavailable.
+Reliable mode is the temporary default. It fully consumes Gemini text, submits the complete response to Despina once, validates word timings against the generated WAV duration, precomputes speed-reachable syllable pulses, and starts WAV playback plus `AdaptiveLipSynchronizer` from one latency-adjusted clock. If alignment is unavailable or invalid, it uses 40 ms energy windows from the actual audio and labels that fallback as approximate.
+
+```bash
+python3 -m src.robot_chat --reliable
+```
+
+Streaming mode also fully consumes Gemini text and makes one ordered TTS request for the complete response. It streams headerless 24 kHz mono signed-16-bit PCM into `paplay` or `aplay`, normalizes variable network chunks into 20 ms analysis frames, and appends a short silent tail so the mouth closes during playback. This energy mode has lower mouth accuracy than reliable word alignment.
+
+```bash
+python3 -m src.robot_chat --streaming
+```
+
+Add `--voice-only` to either mode to avoid servo initialization. Add `--debug-audio` to retain generated audio under `debug_audio/` and print the full response, exact TTS segments, sample/chunk counts, playback completion, producer failures, and dropped analysis frames.
 
 Every response prints millisecond timings for Gemini's first token and completion, Despina's first audio chunk, PCM preparation, incremental alignment, player startup, first submitted audio, and estimated first audible sound. The audible value adds `HEAD_AUDIO_LATENCY_MS`; it is an estimate because PulseAudio/PipeWire does not expose the Bluetooth acoustic delay.
 
@@ -175,12 +187,13 @@ HEAD_AUDIO_BACKEND=pulse
 HEAD_AUDIO_LATENCY_MS=180
 ```
 
-Test voice-only streaming first, then the servos:
+Test reliable voice-only first, compare streaming, then test the servos:
 
 ```bash
-python3 -m src.robot_chat --voice-only
-python3 -m src.robot_chat --mouth-test
-python3 -m src.robot_chat
+python3 -m src.robot_chat --reliable --voice-only --debug-audio
+python3 -m src.robot_chat --streaming --voice-only --debug-audio
+python3 -m src.robot_chat --reliable --mouth-test
+python3 -m src.robot_chat --reliable
 ```
 
 To compare real API availability latency for identical prompts, run:
@@ -189,4 +202,4 @@ To compare real API availability latency for identical prompts, run:
 python3 -m src.benchmark_latency --output latency-benchmark.json
 ```
 
-This benchmark makes billable real requests. It reports complete-response and streaming measurements without claiming Bluetooth acoustic timing. Use `python3 -m src.robot_chat --complete-audio` to test the original complete-WAV path directly.
+This benchmark makes billable real requests. It reports complete-response and streaming measurements without claiming Bluetooth acoustic timing.

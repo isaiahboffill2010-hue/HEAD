@@ -14,9 +14,12 @@ from src.mouth_animation import MouthAnimationEngine
 from src.talking_mouth import HELLO_SEQUENCE, talking_test
 from src.adaptive_lipsync import (AdaptiveLipSynchronizer, MotionSettings,
     calibrated_max_jaw_travel, load_motion_settings)
-from src.audio_sync import AudioPlayer, RawPCMPlayer, energy_events, select_audio_backend, word_events
-from src.gemini_service import GeminiConfig, GeminiService, parse_word_timings, write_wav
+from src.audio_sync import (AudioPlayer, PlaybackDiagnostics, RawPCMPlayer, energy_events,
+    select_audio_backend, validate_word_timings, word_events)
+from src.gemini_service import GeminiConfig, GeminiError, GeminiService, parse_word_timings, write_wav
 from src.streaming_lipsync import StreamingLipSynchronizer
+from src.robot_chat import generate_complete_text, speak_streaming
+from src.latency import LatencyTrace
 
 
 class QuietMock(MockBackend):
@@ -411,6 +414,18 @@ class ServoControllerTests(unittest.TestCase):
         self.assertEqual(first, [True])
         self.assertEqual(len(service.history), 2)
 
+    def test_max_token_finish_is_not_spoken_as_complete_text(self):
+        finish = type("Finish", (), {"name": "MAX_TOKENS"})()
+        candidate = type("Candidate", (), {"finish_reason": finish})()
+        response = type("R", (), {"text": "My day has", "candidates": [candidate]})()
+        class Models:
+            def generate_content_stream(self, **kwargs): return iter((response,))
+        service = GeminiService(GeminiConfig("key", "chat", "tts", "Despina", "align"),
+                                type("Client", (), {"models": Models()})())
+        with self.assertRaisesRegex(GeminiError, "token limit"):
+            list(service.reply_stream("How was your day?"))
+        self.assertEqual(service.history, [])
+
     def test_streaming_despina_decodes_raw_pcm_chunks(self):
         import base64
         audio = base64.b64encode(b"\x01\x00" * 20).decode()
@@ -480,10 +495,64 @@ class ServoControllerTests(unittest.TestCase):
         self.assertTrue(all(0 <= value <= 1 for value in mouth.targets))
         self.assertEqual(mouth.targets[-1], 0.0)
 
+    def test_multisentence_tiny_text_chunks_are_fully_consumed(self):
+        class Service:
+            last_finish_reason = "STOP"
+            def reply_stream(self, user, on_first_token=None):
+                for index, character in enumerate("First sentence. Second sentence."):
+                    if index == 0: on_first_token()
+                    yield character
+        answer = generate_complete_text("hello", Service(), LatencyTrace())
+        self.assertEqual(answer, "First sentence. Second sentence.")
+
+    def test_streaming_submits_entire_response_as_one_tts_segment(self):
+        class Service:
+            def __init__(self): self.texts = []
+            def stream_speech(self, text):
+                self.texts.append(text)
+                yield b"\x01\x00" * 240, 0.01
+                yield b"\x02\x00" * 240, 0.01
+        class Player:
+            def __init__(self): self.diagnostics = PlaybackDiagnostics()
+            def play(self, chunks, **callbacks):
+                callbacks["on_ready"](); total = 0
+                for chunk in chunks:
+                    if total == 0 and callbacks.get("on_first_submit"): callbacks["on_first_submit"]()
+                    callbacks.get("on_chunk") and callbacks["on_chunk"](chunk, total / 48000)
+                    total += len(chunk); self.diagnostics.chunks += 1
+                self.diagnostics.samples_submitted = total // 2
+                self.diagnostics.samples_played = total // 2
+                self.diagnostics.duration_submitted_s = total / 48000
+                self.diagnostics.completed_normally = True; self.diagnostics.return_code = 0
+                return 0
+            def stop(self): pass
+        service = Service()
+        text = "First sentence. Second sentence remains complete."
+        speak_streaming(text, service, player_factory=Player)
+        self.assertEqual(service.texts, [text])
+
+    def test_word_timing_validation_and_fast_word_amplitude(self):
+        words = [{"word": "hi", "start": 0.1, "end": 0.18},
+                 {"word": "robot", "start": 0.4, "end": 0.9}]
+        self.assertTrue(validate_word_timings(words, 1.0))
+        events = word_events(words, duration=1.0, speed_fraction=0.4)
+        fast_openings = [event["openness"] for event in events
+                         if 0.1 <= event["time"] < 0.18 and event["openness"] not in (0.0, 0.12)]
+        self.assertTrue(fast_openings)
+        self.assertLess(max(fast_openings), 0.1)
+        self.assertEqual(events[-1], {"time": 1.0, "openness": 0.0})
+
+    def test_invalid_or_out_of_duration_word_timing_is_rejected(self):
+        self.assertFalse(validate_word_timings(
+            [{"word": "late", "start": 0.9, "end": 1.2}], 1.0))
+
     def test_word_timing_parser_and_wav_energy_fallback(self):
-        self.assertEqual(parse_word_timings('[{"word":"hi","start":0,"end":0.2}]'), [{"start": 0.0, "end": 0.2}])
-        self.assertEqual(word_events([{"start": 0.1, "end": 0.3}]),
-                         [{"time": 0.0, "openness": 0.0}, {"time": 0.1, "openness": 0.55}, {"time": 0.3, "openness": 0.0}])
+        self.assertEqual(parse_word_timings('[{"word":"hi","start":0,"end":0.2}]'),
+                         [{"word": "hi", "start": 0.0, "end": 0.2}])
+        word_motion = word_events([{"start": 0.1, "end": 0.3}])
+        self.assertEqual(word_motion[0], {"time": 0.0, "openness": 0.0})
+        self.assertEqual(word_motion[-1], {"time": 0.3, "openness": 0.0})
+        self.assertTrue(any(event["openness"] > 0 for event in word_motion))
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "audio.wav"
             with wave.open(str(path), "wb") as out:

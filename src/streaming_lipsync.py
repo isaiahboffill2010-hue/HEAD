@@ -18,13 +18,14 @@ class StreamingLipSynchronizer:
         self.mouth, self.settings = mouth, settings
         self.sample_rate, self.clock = sample_rate, clock
         self.max_jaw_travel_deg = max_jaw_travel_deg
-        self.queue: queue.Queue = queue.Queue(maxsize=4)
+        self.queue: queue.Queue = queue.Queue(maxsize=128)
         self.cancelled = threading.Event()
         self.thread = None
         self.analysis_ms = 0.0
         self._position = 0.0
         self._last = None
         self._started = None
+        self.dropped_chunks = 0
         value = float(os.getenv("HEAD_AUDIO_LATENCY_MS", "0")) if latency_ms is None else latency_ms
         self.latency_s = max(0.0, value / 1000)
 
@@ -34,17 +35,15 @@ class StreamingLipSynchronizer:
         self.thread.start()
 
     def submit(self, pcm: bytes, audio_time: float) -> None:
-        try:
-            self.queue.put_nowait((pcm, audio_time))
-        except queue.Full:
+        # API chunk sizes vary with the network. Normalize to 20 ms audio
+        # frames so mouth timing is based on samples, not packet boundaries.
+        frame_bytes = self.sample_rate * 2 // 50
+        for offset in range(0, len(pcm), frame_bytes):
+            frame = pcm[offset:offset + frame_bytes]
             try:
-                self.queue.get_nowait()  # stale mouth data is worse than dropping it
-            except queue.Empty:
-                pass
-            try:
-                self.queue.put_nowait((pcm, audio_time))
+                self.queue.put_nowait((frame, audio_time + offset / (self.sample_rate * 2)))
             except queue.Full:
-                pass
+                self.dropped_chunks += 1
 
     def _run(self) -> None:
         peak = 1.0
