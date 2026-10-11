@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import argparse
 import sys
+import statistics
+import time
 from pathlib import Path
 
 from .calibration import DEFAULT_CONFIG, SAFETY
@@ -180,6 +182,44 @@ def speed_calibration(configs, controller, path: Path = DEFAULT_SETTINGS, input_
     return 0
 
 
+def latency_benchmark(configs, controller, samples: int = 20, input_func=input) -> int:
+    """Supervised P8/P10 software-call benchmark; no Gemini, audio, or config writes."""
+    settings = load_motion_settings(); speed = settings.speed()
+    if samples < 4 or samples > 100:
+        raise ValueError("samples must be between 4 and 100")
+    for name in JAW_NAMES:
+        cfg = configs[name]
+        if cfg.neutral is None or cfg.opening_endpoint is None or cfg.opening_direction is None:
+            raise ConfigurationError(f"{name} opening range is not calibrated")
+    print("Jaw command-latency benchmark: no command has been sent.")
+    print("This measures software call duration only, not actual shaft motion or I2C electrical timing.")
+    print("It alternates only 0% and 10% openness within your saved jaw endpoints at the existing safe speed.")
+    for name in JAW_NAMES:
+        if not _known_reference(name, configs[name], controller, input_func): return 1
+    if any(controller.position(name) != configs[name].neutral for name in JAW_NAMES):
+        print("Benchmark starts only with both jaws at saved closed neutral."); return 1
+    print(SAFETY)
+    if input_func(f"Type BENCHMARK {samples} to run, or STOP: ").strip() != f"BENCHMARK {samples}":
+        print("Benchmark not confirmed; nothing moved."); return 1
+    mouth = MouthController(controller); openness = 0.0
+    for _ in range(samples):
+        openness = .1 if openness == 0 else 0.0
+        mouth.set_openness_step(openness)
+        # The next target is no further than 2 degrees (upper jaw), so this
+        # delay preserves the current verified/conservative speed limit.
+        time.sleep((.1 * max(abs(configs[n].opening_endpoint - configs[n].neutral) for n in JAW_NAMES)) / speed)
+    mouth.set_openness_step(0.0)
+    def report(label, values):
+        ordered = sorted(values)
+        percentile = lambda pct: ordered[min(len(ordered) - 1, round((len(ordered) - 1) * pct))]
+        print(f"{label}: median={statistics.median(values):.2f} ms p95={percentile(.95):.2f} ms p99={percentile(.99):.2f} ms max={max(values):.2f} ms")
+    report("both-jaw command call", [row["command_duration_ms"] for row in mouth.command_log])
+    report("P8 write", [row["upper_write_ms"] for row in mouth.command_log])
+    report("P10 write", [row["lower_write_ms"] for row in mouth.command_log])
+    print("Both jaws were commanded closed. Compare these software timings with streaming debug CSV timings.")
+    return 0
+
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Safe individual jaw calibration and one-shot mouth test")
     parser.add_argument("--mock", action="store_true", help="print commands instead of using Robot HAT hardware")
@@ -192,6 +232,8 @@ def build_parser():
                       help="degrees per second; capped by config/mouth_motion.json")
     speed = sub.add_parser("speed", help="interactively test and save progressively faster mouth speeds")
     speed.add_argument("--motion-config", type=Path, default=DEFAULT_SETTINGS)
+    bench = sub.add_parser("latency", help="supervised P8/P10 software-call latency benchmark")
+    bench.add_argument("--samples", type=int, default=20)
     return parser
 
 
@@ -204,7 +246,9 @@ def main(argv=None) -> int:
             return calibrate_jaw(JAW_BY_COMMAND[args.command], configs, controller, args.config)
         if args.command == "test":
             return combined_test(configs, controller, args.speed)
-        return speed_calibration(configs, controller, args.motion_config)
+        if args.command == "speed":
+            return speed_calibration(configs, controller, args.motion_config)
+        return latency_benchmark(configs, controller, args.samples)
     except KeyboardInterrupt:
         print("\nSTOPPED: no future commands will be sent. Disconnect servo power physically if unsafe.", file=sys.stderr)
         return 130

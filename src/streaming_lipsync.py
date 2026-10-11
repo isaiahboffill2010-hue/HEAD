@@ -62,6 +62,58 @@ class MouthTuning:
         return value
 
 
+class LatestTargetDispatcher:
+    """One hardware worker with one replaceable pending target, never a FIFO."""
+    def __init__(self, mouth, clock, completed) -> None:
+        self.mouth, self.clock, self.completed = mouth, clock, completed
+        self.condition = threading.Condition(); self.latest = None; self.active = False
+        self.closing = self.cancelled = False; self.close_record = None; self.replaced = 0
+        self.thread = threading.Thread(target=self._run, name="mouth-hardware", daemon=True)
+
+    def start(self) -> None: self.thread.start()
+
+    def submit(self, position, due, speech, record) -> None:
+        with self.condition:
+            if self.cancelled or self.closing: return
+            if self.latest is not None: self.replaced += 1
+            self.latest = (position, due, speech, record); self.condition.notify()
+
+    def drain_and_close(self, record) -> None:
+        with self.condition:
+            # Preserve the final newest speech target, then close. Older targets
+            # were already replaced at submit time; do not truncate final words.
+            self.close_record = record; self.closing = True
+            if self.latest is None:
+                self.latest = (0.0, self.clock(), False, record); self.close_record = None
+            self.condition.notify()
+        self.thread.join()
+
+    def cancel(self) -> None:
+        with self.condition:
+            self.cancelled = True; self.latest = None; self.condition.notify()
+        self.thread.join(timeout=1)
+
+    def _run(self) -> None:
+        while True:
+            with self.condition:
+                while self.latest is None and not self.cancelled:
+                    if self.closing: return
+                    self.condition.wait()
+                if self.cancelled: return
+                position, due, speech, record = self.latest; self.latest = None; self.active = True
+            started = self.clock()
+            self.mouth.set_openness_step(position)
+            completed = self.clock()
+            self.completed(due, speech, record, started, completed)
+            with self.condition:
+                self.active = False
+                if self.closing and self.latest is None and self.close_record is not None:
+                    close_record, self.close_record = self.close_record, None
+                    self.latest = (0.0, self.clock(), False, close_record)
+                elif self.closing and self.latest is None:
+                    return
+
+
 class StreamingLipSynchronizer:
     """Consume submitted PCM without delaying playback, then drain it at EOS.
 
@@ -86,6 +138,7 @@ class StreamingLipSynchronizer:
         self._started = None
         self._smoothed_target = 0.0
         self._last_commanded_position = 0.0
+        self._dispatcher = None
         self.motion_records: list[dict[str, float | bool]] = []
         self.dropped_chunks = 0
         self.diagnostics = StreamingLipSyncDiagnostics()
@@ -101,8 +154,22 @@ class StreamingLipSynchronizer:
 
     def start(self) -> None:
         self._started = self._last = self.clock()
+        self._dispatcher = LatestTargetDispatcher(self.mouth, self.clock, self._hardware_completed)
+        self._dispatcher.start()
         self.thread = threading.Thread(target=self._run, name="mouth-pcm", daemon=True)
         self.thread.start()
+
+    def _hardware_completed(self, due, speech, record, started, completed) -> None:
+        """Record software call timing only; positional servos provide no feedback."""
+        lateness_ms = max(0.0, (started - due) * 1000); duration_ms = (completed - started) * 1000
+        record.update({"hardware_started_at": started, "hardware_completed_at": completed,
+                       "hardware_lateness_ms": lateness_ms, "hardware_duration_ms": duration_ms})
+        self.diagnostics.commanded_frames += 1
+        self.diagnostics.max_command_lateness_ms = max(self.diagnostics.max_command_lateness_ms, lateness_ms)
+        self.diagnostics.max_command_duration_ms = max(self.diagnostics.max_command_duration_ms, duration_ms)
+        self.diagnostics.last_command_completed_at = completed
+        if lateness_ms > self.settings.update_interval_s * 1000: self.diagnostics.late_hardware_commands += 1
+        if speech: self.diagnostics.last_speech_mouth_command_at = completed
 
     def note_tts_pcm_received(self) -> None:
         self.diagnostics.final_tts_pcm_received_at = self.clock()
@@ -175,24 +242,24 @@ class StreamingLipSynchronizer:
             position = max(0.0, min(1.0, self._position))
             command = abs(position - self._last_commanded_position) >= (self.tuning.command_deadband_deg / self.max_jaw_travel_deg)
             command_started = command_completed = None
+            record = {"audio_time": frame_time, "rms": rms, "threshold": threshold,
+                      "target": target, "openness": position, "commanded": command,
+                      "scheduled_at": frame_due, "command_started_at": 0.0, "command_completed_at": 0.0,
+                      "command_lateness_ms": 0.0, "command_duration_ms": 0.0,
+                      "hardware_started_at": 0.0, "hardware_completed_at": 0.0,
+                      "hardware_lateness_ms": 0.0, "hardware_duration_ms": 0.0,
+                      "coalesced_frames": len(batch) - 1}
             if command:
-                command_started = self.clock(); lateness_ms = max(0.0, (command_started - frame_due) * 1000)
-                self.mouth.set_openness_step(position)
-                command_completed = self.clock(); duration_ms = (command_completed - command_started) * 1000
-                self._last_commanded_position = position; self.diagnostics.commanded_frames += 1
-                self.diagnostics.max_command_lateness_ms = max(self.diagnostics.max_command_lateness_ms, lateness_ms)
-                self.diagnostics.max_command_duration_ms = max(self.diagnostics.max_command_duration_ms, duration_ms)
-                self.diagnostics.last_command_completed_at = command_completed
-                if lateness_ms > self.settings.update_interval_s * 1000: self.diagnostics.late_hardware_commands += 1
-                if target > 0: self.diagnostics.last_speech_mouth_command_at = command_completed
+                command_started = self.clock()
+                assert self._dispatcher is not None
+                self._dispatcher.submit(position, frame_due, target > 0, record)
+                command_completed = self.clock(); self._last_commanded_position = position
             else: self.diagnostics.stationary_commands_suppressed += 1
-            self.motion_records.append({"audio_time": frame_time, "rms": rms, "threshold": threshold,
-                                        "target": target, "openness": position, "commanded": command,
-                                        "scheduled_at": frame_due, "command_started_at": command_started or 0.0,
-                                        "command_completed_at": command_completed or 0.0,
-                                        "command_lateness_ms": (command_started - frame_due) * 1000 if command_started else 0.0,
-                                        "command_duration_ms": (command_completed - command_started) * 1000 if command else 0.0,
-                                        "coalesced_frames": len(batch) - 1})
+            record["command_started_at"] = command_started or 0.0
+            record["command_completed_at"] = command_completed or 0.0
+            record["command_lateness_ms"] = (command_started - frame_due) * 1000 if command_started else 0.0
+            record["command_duration_ms"] = (command_completed - command_started) * 1000 if command else 0.0
+            self.motion_records.append(record)
             self.diagnostics.last_scheduled_mouth_at = frame_due
             self.diagnostics.last_mouth_frame_processed_at = self.clock()
             self.analysis_ms += (self.clock() - began) * 1000
@@ -211,9 +278,16 @@ class StreamingLipSynchronizer:
         if playback_started_at is not None and self.diagnostics.last_speech_audio_end_s is not None:
             self.diagnostics.final_audible_audio_estimate_at = (
                 playback_started_at + self.latency_s + self.diagnostics.last_speech_audio_end_s)
-        if close and not self.cancelled.is_set():
-            self.mouth.set_openness_step(0.0)
-            self.diagnostics.commanded_frames += 1
+        if close and not self.cancelled.is_set() and self._dispatcher:
+            close_record = {"audio_time": self.diagnostics.final_pcm_audio_end_s or 0.0, "rms": 0.0,
+                            "threshold": 0.0, "target": 0.0, "openness": 0.0, "commanded": True,
+                            "scheduled_at": self.clock(), "command_started_at": 0.0, "command_completed_at": 0.0,
+                            "command_lateness_ms": 0.0, "command_duration_ms": 0.0,
+                            "hardware_started_at": 0.0, "hardware_completed_at": 0.0,
+                            "hardware_lateness_ms": 0.0, "hardware_duration_ms": 0.0, "coalesced_frames": 0}
+            self.motion_records.append(close_record)
+            self._dispatcher.drain_and_close(close_record)
+            self.diagnostics.stale_frames_coalesced += self._dispatcher.replaced
         self._logger.debug(
             "mouth EOS final_tts_pcm=%s last_speech_audio=%s last_scheduled=%s playback_complete=%s "
             "last_processed=%s dropped=%s shutdown=%s audio_delay=%.3f mouth_offset=%.3f speech=%s quiet=%s commands=%s suppressed=%s",
@@ -227,6 +301,8 @@ class StreamingLipSynchronizer:
     def stop(self, close: bool = True) -> None:
         """Cancel immediately (interrupt/error path); no queued command is retained."""
         self.cancelled.set()
+        if self._dispatcher:
+            self._dispatcher.cancel()
         if self.thread:
             try:
                 self.queue.put_nowait(self._eos)

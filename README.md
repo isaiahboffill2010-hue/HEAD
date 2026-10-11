@@ -167,6 +167,12 @@ python3 -m src.mouth_diagnostics debug_audio/head-YYYYMMDD-HHMMSS.wav \
 
 If hardware writes are slow, HEAD analyzes all expired PCM frames but emits only the newest valid rate-limited jaw target. It never replays a stale servo-command backlog after the related audio has passed.
 
+To isolate Robot HAT application-call timing from Gemini, TTS, PulseAudio, and Bluetooth, run the supervised jaw-only benchmark. It requires the same known-powered references and exact confirmation, alternates only 0%/10% openness inside saved endpoints at the existing verified/conservative speed, leaves both jaws closed, and does not write configuration files. It reports median, p95, p99, and maximum total/P8/P10 software-call durations; those are not shaft-position measurements.
+
+```bash
+python3 -m src.mouth_calibration latency --samples 20
+```
+
 ## Reliable and streaming conversation modes
 
 Reliable mode is the temporary default. It fully consumes Gemini text, submits the complete response to Despina once, validates word timings against the generated WAV duration, precomputes speed-reachable syllable pulses, and starts WAV playback plus `AdaptiveLipSynchronizer` from one latency-adjusted clock. If alignment is unavailable or invalid, it uses 40 ms energy windows from the actual audio and labels that fallback as approximate.

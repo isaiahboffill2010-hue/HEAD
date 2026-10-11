@@ -171,14 +171,17 @@ def speak_streaming(text, service: GeminiService, *, mouth=None, configs=None, t
                 with timeline.open("w", newline="", encoding="utf-8") as out:
                     writer = csv.DictWriter(out, fieldnames=("audio_time", "rms", "threshold", "target", "openness", "commanded",
                                                              "scheduled_at", "command_started_at", "command_completed_at",
-                                                             "command_lateness_ms", "command_duration_ms", "coalesced_frames"))
+                                                             "command_lateness_ms", "command_duration_ms", "hardware_started_at",
+                                                             "hardware_completed_at", "hardware_lateness_ms", "hardware_duration_ms",
+                                                             "coalesced_frames"))
                     writer.writeheader(); writer.writerows(lip.motion_records)
                 print(f"  preserved mouth analysis: {timeline}")
             if mouth is not None and getattr(mouth, "command_log", None):
                 commands = saved.with_suffix(".jaw-commands.csv")
                 with commands.open("w", newline="", encoding="utf-8") as out:
                     writer = csv.DictWriter(out, fieldnames=("timestamp", "command_started_at", "command_completed_at",
-                                                             "command_duration_ms", "openness", "upper_jaw_angle", "lower_jaw_angle"))
+                                                             "command_duration_ms", "upper_write_ms", "lower_write_ms", "openness",
+                                                             "upper_jaw_angle", "lower_jaw_angle"))
                     writer.writeheader(); writer.writerows(mouth.command_log)
                 print(f"  preserved commanded jaw log (not position feedback): {commands}")
         _print_diagnostics(text, [text], player.diagnostics, mode="streaming", audio_path=saved,

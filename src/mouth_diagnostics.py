@@ -56,7 +56,10 @@ def compare_recordings(mouth_csv: Path, jaw_csv: Path) -> dict[str, float | int]
     numbers = lambda rows, name: [float(row[name]) for row in rows if row.get(name) not in (None, "")]
     return {"analysis_frames": len(motion), "jaw_commands": len(jaws),
             "max_scheduled_lateness_ms": max(numbers(motion, "command_lateness_ms") or [0]),
+            "max_hardware_lateness_ms": max(numbers(motion, "hardware_lateness_ms") or [0]),
             "max_command_duration_ms": max(numbers(jaws, "command_duration_ms") or [0]),
+            "max_p8_write_ms": max(numbers(jaws, "upper_write_ms") or [0]),
+            "max_p10_write_ms": max(numbers(jaws, "lower_write_ms") or [0]),
             "coalesced_frames": int(sum(numbers(motion, "coalesced_frames") or [0]))}
 
 

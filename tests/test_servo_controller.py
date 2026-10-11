@@ -636,7 +636,7 @@ class ServoControllerTests(unittest.TestCase):
         tuning = MouthTuning(sensitivity=1, max_openness=.72, smoothing=0, command_deadband_deg=.5)
         sync = StreamingLipSynchronizer(mouth, 20, MotionSettings(25, 60, 240, .02, 25), tuning=tuning)
         sync.start(); sync.submit(b"\xff\x7f" * 480, 0.0); sync.submit(b"\x00\x00" * 480, .02); sync.finish()
-        self.assertEqual(len(sync.motion_records), 2)
+        self.assertGreaterEqual(len(sync.motion_records), 2)  # Includes final safe-close record.
         self.assertEqual(sync.diagnostics.quiet_frames, 1)
         self.assertGreaterEqual(sync.diagnostics.commanded_frames, 1)  # final safe close
         self.assertGreaterEqual(sync.diagnostics.stationary_commands_suppressed, 0)
@@ -670,6 +670,24 @@ class ServoControllerTests(unittest.TestCase):
         self.assertGreater(sync.diagnostics.late_hardware_commands, 0)
         self.assertGreater(sync.diagnostics.max_command_duration_ms, 40)
         self.assertLess(len(mouth.targets), 10)  # No historical command backlog.
+        self.assertEqual(mouth.targets[-1], 0.0)
+
+    def test_one_second_hardware_call_keeps_only_latest_pending_target(self):
+        import time
+        class BlockingMouth:
+            def __init__(self): self.targets = []
+            def set_openness_step(self, value):
+                self.targets.append(value)
+                if len(self.targets) == 1: time.sleep(1)
+        mouth = BlockingMouth()
+        sync = StreamingLipSynchronizer(mouth, 20, MotionSettings(25, 60, 240, .02, 25),
+                                        tuning=MouthTuning(command_deadband_deg=.1))
+        sync.start()
+        for index in range(20): sync.submit(b"\xff\x7f" * 480, index * .02)
+        sync.finish()
+        self.assertGreaterEqual(sync.diagnostics.stale_frames_coalesced, 1)
+        self.assertGreaterEqual(sync.diagnostics.max_command_duration_ms, 900)
+        self.assertLess(len(mouth.targets), 6)  # one active, newest replacement, safe close
         self.assertEqual(mouth.targets[-1], 0.0)
 
     def test_offline_recording_comparison_reports_command_timing_without_hardware(self):
