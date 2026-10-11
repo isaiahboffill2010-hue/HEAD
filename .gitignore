@@ -3,5 +3,5 @@ __pycache__/
 .pytest_cache/
 .env.local
 *.wav
-# Device-specific proprietary/custom wake-word models are local credentials/assets.
-*.ppn
+# Cached local Vosk model; it is downloaded by src.vosk_setup, not committed.
+models/

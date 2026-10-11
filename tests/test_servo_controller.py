@@ -25,7 +25,8 @@ from src.robot_chat import (establish_mouth, generate_complete_text, speak_strea
 import src.robot_chat as robot_chat
 from src.latency import LatencyTrace
 from src.microphone import Microphone, Utterance
-from src.wake_word import PorcupineWakeWord
+from src.vosk_wake import VoskWakeWord, VoskWakeWordError
+from src.vosk_setup import ensure_model
 
 
 class QuietMock(MockBackend):
@@ -898,15 +899,29 @@ class ServoControllerTests(unittest.TestCase):
         self.assertIsNotNone(utterance)
         self.assertGreater(utterance.duration_s, .5)
 
-    def test_offline_wake_detector_uses_local_pcm_model_result(self):
-        class Engine:
-            frame_length = 2; sample_rate = 16000
-            def __init__(self): self.samples = None
-            def process(self, samples): self.samples = samples; return 0
-            def delete(self): pass
-        engine = Engine(); detector = PorcupineWakeWord(engine)
+    def test_offline_vosk_wake_detector_uses_constrained_local_result(self):
+        class Recognizer:
+            def AcceptWaveform(self, pcm): return False
+            def PartialResult(self): return '{"partial": "ziggy"}'
+        detector = VoskWakeWord(Recognizer(), sample_rate=16000, variants={"ziggy"})
         self.assertTrue(detector.detected(b"\x01\x00\xff\xff"))
-        self.assertEqual(engine.samples, (1, -1))
+
+    def test_vosk_false_trigger_text_is_rejected(self):
+        class Recognizer:
+            def AcceptWaveform(self, pcm): return True
+            def Result(self): return '{"text": "background conversation"}'
+        detector = VoskWakeWord(Recognizer(), sample_rate=16000, variants={"ziggy", "ziggie"})
+        self.assertFalse(detector.detected(b"\x01\x00\xff\xff"))
+
+    def test_vosk_model_must_be_cached_and_is_never_downloaded_at_startup(self):
+        with tempfile.TemporaryDirectory() as directory, patch.dict(
+                "os.environ", {"HEAD_VOSK_MODEL_PATH": str(Path(directory) / "missing")}, clear=False):
+            with self.assertRaises(VoskWakeWordError):
+                VoskWakeWord.from_environment()
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "model"; (target / "am").mkdir(parents=True)
+            (target / "am" / "final.mdl").write_bytes(b"cached")
+            self.assertEqual(ensure_model(target=target), target)
 
     def test_background_audio_is_not_transcribed_until_local_wake_detects(self):
         class MicrophoneDouble:
@@ -938,6 +953,35 @@ class ServoControllerTests(unittest.TestCase):
         self.assertEqual(service.calls, 1)
         self.assertEqual(mic.prefixes, [b"backgroundziggy"])
         speak.assert_called_once()
+
+    def test_wake_state_machine_handles_two_complete_turns_without_duplicates(self):
+        class MicrophoneDouble:
+            device = "plughw:2,0"; rate = 16000; silence_s = 1.0
+            def __init__(self): self.blocks = iter([b"ziggy", b"ziggy", KeyboardInterrupt()]); self.recorded = 0
+            def read_pcm(self, size):
+                item = next(self.blocks)
+                if isinstance(item, BaseException): raise item
+                return item
+            def record_after_wake(self, prefix):
+                self.recorded += 1; return Utterance(b"question", .5)
+            def write_wav(self, utterance, path): path.write_bytes(utterance.pcm); return path
+            def close(self): pass
+        class Wake:
+            frame_length = 2; sample_rate = 16000
+            def detected(self, pcm): return True
+            def close(self): pass
+        class WakeFactory:
+            @classmethod
+            def from_environment(cls): return Wake()
+        mic = MicrophoneDouble(); service = type("Service", (), {"calls": 0})()
+        def transcribe(path): service.calls += 1; return f"question {service.calls}"
+        service.transcribe_wav = transcribe
+        with patch.object(robot_chat, "generate_complete_text", return_value="answer"), \
+             patch.object(robot_chat, "speak_streaming") as speak:
+            with self.assertRaises(KeyboardInterrupt):
+                robot_chat.run_listen_session(service, mode="streaming", microphone_factory=lambda: mic,
+                                               wake_factory=WakeFactory)
+        self.assertEqual((mic.recorded, service.calls, speak.call_count), (2, 2, 2))
 
     def test_ziggy_uses_one_second_silence_even_with_legacy_mic_setting(self):
         with patch.dict("os.environ", {"HEAD_MIC_SILENCE_MS": "550"}, clear=False):

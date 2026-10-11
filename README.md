@@ -20,7 +20,7 @@ python3 -m src.robot_chat --listen --streaming
 
 Ziggy prints `Listening for wake word` and only sends a transcript to Gemini when it contains `Ziggy`, such as “Ziggy, what time is it?”. It starts voice-only if the jaws have not been safely referenced; this is intentional and never commands P8/P10. The capture process remains open between turns, uses 16 kHz mono S16_LE and lightweight energy VAD, retains 300 ms of pre-roll, stops after 1,000 ms silence by default, and limits utterances to 15 seconds.
 
-Wake detection is local and does not upload background speech. It uses a custom Raspberry-Pi Porcupine `.ppn` model for the phrase `Ziggy`, plus `PICOVOICE_ACCESS_KEY`; put both settings in `.env.local` (see `.env.example`). Create/download the Pi-specific model through Picovoice before launching. Without that model and key, Ziggy fails closed rather than transcribing background audio with Gemini.
+Wake detection is local and does not upload background speech. It uses the free Vosk small English model, cached under `models/` after one setup download. There is no Picovoice account, key, `.ppn` model, or subscription. Before the first launch, run `python3 -m src.vosk_setup`; ordinary Ziggy startup never downloads a model. Vosk uses a constrained grammar for `ziggy`/`ziggie`; unlike a dedicated wake engine, it has no equivalent confidence slider.
 
 To enable mouth motion for one continuously powered run, establish trusted P8/P10 references in that same process. Initialization sends no jaw command; enter the actual already-commanded angles and `POWERED` only if power remained continuous and neither linkage was moved:
 

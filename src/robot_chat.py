@@ -15,7 +15,7 @@ from .mouth_calibration import _known_reference
 from .servo_controller import ConfigurationError, RobotHatBackend, ServoController, load_config
 from .streaming_lipsync import StreamingLipSynchronizer
 from .microphone import Microphone
-from .wake_word import PorcupineWakeWord, WakeWordConfigurationError
+from .vosk_wake import VoskWakeWord, VoskWakeWordError
 
 
 class ConversationState(str, Enum):
@@ -263,14 +263,14 @@ def run_session(service, *, voice_only, mode="reliable", mouth=None, configs=Non
 
 
 def run_listen_session(service, *, mode, mouth=None, configs=None, debug_audio=False,
-                       microphone_factory=Microphone, wake_factory=PorcupineWakeWord) -> int:
+                       microphone_factory=Microphone, wake_factory=VoskWakeWord) -> int:
     """Hands-free turns. Capture remains open; it is idle while HEAD speaks."""
     microphone = microphone_factory()
     microphone.silence_s = ziggy_silence_seconds()
     wake = wake_factory.from_environment()
     if wake.sample_rate != microphone.rate:
         wake.close()
-        raise WakeWordConfigurationError(
+        raise VoskWakeWordError(
             f"Ziggy wake model requires {wake.sample_rate} Hz but microphone capture is {microphone.rate} Hz")
     pre_roll = deque(maxlen=max(1, round(.3 * wake.sample_rate / wake.frame_length)))
     state = ConversationState.WAITING_FOR_WAKE_WORD
@@ -284,7 +284,7 @@ def run_listen_session(service, *, mode, mouth=None, configs=None, debug_audio=F
                     pcm = microphone.read_pcm(wake.frame_length * 2)
                     pre_roll.append(pcm)
                     if wake.detected(pcm):
-                        print("Ziggy: Wake word detected.")
+                        print("Wake word detected: Ziggy")
                         state = ConversationState.RECORDING_QUESTION
                         break
             # Include the detector's 300 ms rolling audio history. This keeps
@@ -374,7 +374,7 @@ def main(argv=None):
                            configs=configs, debug_audio=args.debug_audio)
     except KeyboardInterrupt:
         print("\nSTOPPED: no future mouth commands will be sent. Physically disconnect servo power if unsafe."); return 130
-    except (GeminiError, ConfigurationError, WakeWordConfigurationError, RuntimeError) as exc:
+    except (GeminiError, ConfigurationError, VoskWakeWordError, RuntimeError) as exc:
         print(f"Setup error: {exc}"); return 2
 
 
